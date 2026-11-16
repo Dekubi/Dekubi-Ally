@@ -209,21 +209,21 @@ add_executable(dekubi
     util/controller_navigation.cpp
     util/controller_navigation.h
     yuzu.qrc
-    Dekubi/Dekubi_ui.cpp
-    Dekubi/Dekubi_ui.h
-    Dekubi/home.cpp
-    Dekubi/home.h
-    Dekubi/game_controls.cpp
-    Dekubi/game_controls.h
-    Dekubi/main_window_Dekubi.cpp
-    Dekubi/perf_overlay.cpp
-    Dekubi/perf_overlay.h
-    Dekubi/precompile_gate.cpp
-    Dekubi/precompile_gate.h
-    Dekubi/saves_window.cpp
-    Dekubi/saves_window.h
-    Dekubi/whats_new.cpp
-    Dekubi/whats_new.h
+    dekubi/dekubi_ui.cpp
+    dekubi/dekubi_ui.h
+    dekubi/home.cpp
+    dekubi/home.h
+    dekubi/game_controls.cpp
+    dekubi/game_controls.h
+    dekubi/main_window_dekubi.cpp
+    dekubi/perf_overlay.cpp
+    dekubi/perf_overlay.h
+    dekubi/precompile_gate.cpp
+    dekubi/precompile_gate.h
+    dekubi/saves_window.cpp
+    dekubi/saves_window.h
+    dekubi/whats_new.cpp
+    dekubi/whats_new.h
     util/export_log.cpp
     util/export_log.h
     util/limitable_input_dialog.cpp
@@ -302,7 +302,7 @@ if (ENABLE_UPDATE_CHECKER)
     target_compile_definitions(dekubi PUBLIC ENABLE_UPDATE_CHECKER)
 endif()
 # Dekubi/ includes ui_main.h, which AutoUic already generates for main_window.cpp.
-set_source_files_properties(Dekubi/Dekubi_ui.cpp Dekubi/main_window_Dekubi.cpp
+set_source_files_properties(dekubi/dekubi_ui.cpp dekubi/main_window_dekubi.cpp
     PROPERTIES SKIP_AUTOUIC ON)
 
 # The updater unpacks the release zip (updater/update_dialog.cpp); Export Log writes one

@@ -28,8 +28,8 @@
 #endif
 #include "ui_update_dialog.h"
 #include "update_dialog.h"
-#include "yuzu/Dekubi/Dekubi_ui.h"
-#include "yuzu/Dekubi/whats_new.h"
+#include "yuzu/dekubi/dekubi_ui.h"
+#include "yuzu/dekubi/whats_new.h"
 
 #include "common/httplib.h"
 

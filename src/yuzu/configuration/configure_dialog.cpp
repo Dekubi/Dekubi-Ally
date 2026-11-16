@@ -34,7 +34,7 @@
 #include "yuzu/configuration/configure_ui.h"
 #include "yuzu/configuration/configure_web.h"
 #include "yuzu/hotkeys.h"
-#include "yuzu/Dekubi/Dekubi_ui.h"
+#include "yuzu/dekubi/dekubi_ui.h"
 
 ConfigureDialog::ConfigureDialog(QWidget* parent, HotkeyRegistry& registry_,
                                  InputCommon::InputSubsystem* input_subsystem,

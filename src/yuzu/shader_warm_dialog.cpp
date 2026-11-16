@@ -19,7 +19,7 @@
 #include "common/settings.h"
 #include "qt_common/config/uisettings.h"
 #include "video_core/shader_warm/shader_warm_builder.h"
-#include "yuzu/Dekubi/Dekubi_ui.h"
+#include "yuzu/dekubi/dekubi_ui.h"
 #include "yuzu/shader_warm_dialog.h"
 
 namespace ShaderWarm = VideoCommon::ShaderWarm;

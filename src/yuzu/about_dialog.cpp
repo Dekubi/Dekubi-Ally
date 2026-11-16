@@ -9,7 +9,7 @@
 #include "common/scm_rev.h"
 #include "ui_aboutdialog.h"
 #include "yuzu/about_dialog.h"
-#include "yuzu/Dekubi/Dekubi_ui.h"
+#include "yuzu/dekubi/dekubi_ui.h"
 
 AboutDialog::AboutDialog(QWidget* parent)
     : QDialog(parent), ui{std::make_unique<Ui::AboutDialog>()} {

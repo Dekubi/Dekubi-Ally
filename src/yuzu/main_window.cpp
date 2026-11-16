@@ -88,8 +88,8 @@ struct Dekubi_HighRes_Process_Boost {
 #include "util/clickable_label.h"
 #include "util/controller_navigation.h"
 #include "util/export_log.h"
-#include "yuzu/Dekubi/Dekubi_ui.h"
-#include "yuzu/Dekubi/perf_overlay.h"
+#include "yuzu/dekubi/dekubi_ui.h"
+#include "yuzu/dekubi/perf_overlay.h"
 #include "util/overlay_dialog.h"
 
 #include "multiplayer/state.h"

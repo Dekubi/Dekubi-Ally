@@ -13,7 +13,7 @@
 #include "qt_common/qt_common.h"
 #include "qt_common/util/game.h"
 #include "ui_main.h"
-#include "yuzu/dekubi/Dekubi_ui.h"
+#include "yuzu/dekubi/dekubi_ui.h"
 #include "yuzu/bootmanager.h"
 #include "yuzu/dekubi/game_controls.h"
 #include "yuzu/dekubi/home.h"

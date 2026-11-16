@@ -16,7 +16,7 @@
 #include "yuzu/configuration/configuration_shared.h"
 #include "yuzu/configuration/configure_graphics_extensions.h"
 #include "yuzu/configuration/shared_widget.h"
-#include "yuzu/Dekubi/Dekubi_ui.h"
+#include "yuzu/dekubi/dekubi_ui.h"
 
 ConfigureGraphicsExtensions::ConfigureGraphicsExtensions(
     const Core::System& system_, std::shared_ptr<std::vector<ConfigurationShared::Tab*>> group_,

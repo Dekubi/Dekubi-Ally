@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-#include "yuzu/dekubi/Dekubi_ui.h"
+#include "yuzu/dekubi/dekubi_ui.h"
 
 #include <algorithm>
 #include <array>

@@ -19,7 +19,7 @@
 #include "ui_loading_screen.h"
 #include "video_core/rasterizer_interface.h"
 #include "yuzu/loading_screen.h"
-#include "yuzu/Dekubi/Dekubi_ui.h"
+#include "yuzu/dekubi/dekubi_ui.h"
 
 // Mingw seems to not have QMovie at all. If QMovie is missing then use a single frame instead of an
 // showing the full animation

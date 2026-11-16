@@ -23,7 +23,7 @@
 #include <QToolButton>
 
 #include "qt_common/game_list/game_list_p.h"
-#include "yuzu/dekubi/Dekubi_ui.h"
+#include "yuzu/dekubi/dekubi_ui.h"
 #include "yuzu/dekubi/saves_window.h"
 
 namespace LichiiUi {

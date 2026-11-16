@@ -11,7 +11,7 @@
 #include <QTimer>
 #include <QToolButton>
 
-#include "yuzu/dekubi/Dekubi_ui.h"
+#include "yuzu/dekubi/dekubi_ui.h"
 
 namespace LichiiUi {
 namespace {

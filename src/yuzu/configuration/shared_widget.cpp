@@ -47,7 +47,7 @@
 #include "common/settings_common.h"
 #include "qt_common/config/shared_translation.h"
 #include "qt_common/qt_compat.h"
-#include "yuzu/Dekubi/Dekubi_ui.h"
+#include "yuzu/dekubi/dekubi_ui.h"
 
 namespace ConfigurationShared {
 
