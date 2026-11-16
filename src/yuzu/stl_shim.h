@@ -1,4 +1,6 @@
-﻿#pragma once
+#pragma once
+// MSVC STL internals this build links against; other compilers have no such symbols.
+#ifdef _MSC_VER
 #include <cstdint>
 extern "C" {
 void* __cdecl __std_rotate(void* F, void* M, void* L) noexcept { auto* f=(uint8_t*)F; auto* m=(uint8_t*)M; auto* l=(uint8_t*)L; if(f==m) return l; if(m==l) return f; uint8_t* r=f+(l-m); uint8_t* n=m; while(f!=n){ uint8_t t=*f; *f++=*n; *n++=t; if(n==l) n=m; else if(f==m) m=n; } return r; }
@@ -8,4 +10,4 @@ void __cdecl __std_replace_copy_1(const void* F, const void* L, void* D, uint8_t
 void __cdecl __std_replace_copy_2(const void* F, const void* L, void* D, uint16_t O, uint16_t N) noexcept { auto* f=(const uint16_t*)F; auto* l=(const uint16_t*)L; auto* d=(uint16_t*)D; for(;f!=l;++f,++d) *d=(*f==O)?N:*f; }
 struct MM2U { const void* a; const void* b; }; MM2U __cdecl __std_minmax_element_2u(const void* F, const void* L) noexcept { auto* f=(const uint16_t*)F; auto* l=(const uint16_t*)L; MM2U r{f,f}; if(f==l) return r; auto* mn=f; auto* mx=f; while(++f!=l){ if(*f<*mn) mn=f; if(*f>=*mx) mx=f; } r.a=mn; r.b=mx; return r; }
 }
-
+#endif

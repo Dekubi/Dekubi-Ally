@@ -1,6 +1,6 @@
-﻿#pragma warning(disable: 4456 4457 4458 4459)
-#pragma warning(push)
-#pragma warning(disable: 4459)
+#ifdef _MSC_VER
+#pragma warning(disable: 4456 4457 4458 4459)
+#endif
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <fmt/format.h>

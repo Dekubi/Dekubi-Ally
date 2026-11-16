@@ -99,7 +99,7 @@ jobs:
       - name: Build
         run: |
           ccache --zero-stats
-          cmake --build build/release --target dekubi --parallel
+          cmake --build build/release --target dekubi --parallel -- -k 0
           ccache --show-stats
 
       - name: Package
