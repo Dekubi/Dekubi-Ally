@@ -1,0 +1,56 @@
+<RCC>
+    <qresource prefix="/">
+        <file alias="icons/default/256x256/lichii.png">../../dist/lichii.png</file>
+        <file alias="img/lichii.ico">../../dist/lichii.ico</file>
+        <file alias="overlay/osk_button_shift_lock_off.png">../../dist/icons/overlay/osk_button_shift_lock_off.png</file>
+        <file alias="overlay/osk_button_shift_lock_on.png">../../dist/icons/overlay/osk_button_shift_lock_on.png</file>
+        <file alias="fritchii/style.qss">dekubi/style.qss</file>
+        <file alias="fritchii/icons/chevron-down.svg">dekubi/icons/chevron-down.svg</file>
+        <file alias="fritchii/icons/check.svg">dekubi/icons/check.svg</file>
+    </qresource>
+    <qresource prefix="/fritchii">
+        <file alias="icons/default/256x256/lichii.png">../../dist/lichii.png</file>
+        <file alias="img/lichii.ico">../../dist/lichii.ico</file>
+        <file alias="overlay/osk_button_shift_lock_off.png">../../dist/icons/overlay/osk_button_shift_lock_off.png</file>
+        <file alias="overlay/osk_button_shift_lock_on.png">../../dist/icons/overlay/osk_button_shift_lock_on.png</file>
+        <file alias="fritchii/style.qss">dekubi/style.qss</file>
+        <file alias="fritchii/icons/chevron-down.svg">dekubi/icons/chevron-down.svg</file>
+        <file alias="fritchii/icons/check.svg">dekubi/icons/check.svg</file>
+    </qresource>
+    <qresource prefix="/dekubi">
+        <file alias="icons/default/256x256/lichii.png">../../dist/lichii.png</file>
+        <file alias="img/lichii.ico">../../dist/lichii.ico</file>
+        <file alias="overlay/osk_button_shift_lock_off.png">../../dist/icons/overlay/osk_button_shift_lock_off.png</file>
+        <file alias="overlay/osk_button_shift_lock_on.png">../../dist/icons/overlay/osk_button_shift_lock_on.png</file>
+        <file alias="fritchii/style.qss">dekubi/style.qss</file>
+        <file alias="fritchii/icons/chevron-down.svg">dekubi/icons/chevron-down.svg</file>
+        <file alias="fritchii/icons/check.svg">dekubi/icons/check.svg</file>
+    </qresource>
+    <qresource prefix="/Dekubi">
+        <file alias="icons/default/256x256/lichii.png">../../dist/lichii.png</file>
+        <file alias="img/lichii.ico">../../dist/lichii.ico</file>
+        <file alias="overlay/osk_button_shift_lock_off.png">../../dist/icons/overlay/osk_button_shift_lock_off.png</file>
+        <file alias="overlay/osk_button_shift_lock_on.png">../../dist/icons/overlay/osk_button_shift_lock_on.png</file>
+        <file alias="fritchii/style.qss">dekubi/style.qss</file>
+        <file alias="fritchii/icons/chevron-down.svg">dekubi/icons/chevron-down.svg</file>
+        <file alias="fritchii/icons/check.svg">dekubi/icons/check.svg</file>
+    </qresource>
+    <qresource prefix="/yuzu">
+        <file alias="icons/default/256x256/lichii.png">../../dist/lichii.png</file>
+        <file alias="img/lichii.ico">../../dist/lichii.ico</file>
+        <file alias="overlay/osk_button_shift_lock_off.png">../../dist/icons/overlay/osk_button_shift_lock_off.png</file>
+        <file alias="overlay/osk_button_shift_lock_on.png">../../dist/icons/overlay/osk_button_shift_lock_on.png</file>
+        <file alias="fritchii/style.qss">dekubi/style.qss</file>
+        <file alias="fritchii/icons/chevron-down.svg">dekubi/icons/chevron-down.svg</file>
+        <file alias="fritchii/icons/check.svg">dekubi/icons/check.svg</file>
+    </qresource>
+    <qresource prefix="/lichii">
+        <file alias="icons/default/256x256/lichii.png">../../dist/lichii.png</file>
+        <file alias="img/lichii.ico">../../dist/lichii.ico</file>
+        <file alias="overlay/osk_button_shift_lock_off.png">../../dist/icons/overlay/osk_button_shift_lock_off.png</file>
+        <file alias="overlay/osk_button_shift_lock_on.png">../../dist/icons/overlay/osk_button_shift_lock_on.png</file>
+        <file alias="fritchii/style.qss">dekubi/style.qss</file>
+        <file alias="fritchii/icons/chevron-down.svg">dekubi/icons/chevron-down.svg</file>
+        <file alias="fritchii/icons/check.svg">dekubi/icons/check.svg</file>
+    </qresource>
+</RCC>
