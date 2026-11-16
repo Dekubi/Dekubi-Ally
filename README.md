@@ -18,14 +18,6 @@ Builds are on the [Releases page](https://github.com/Dekubi/Dekubi-Ally/releases
 
 Bring your own files. They are not included, and only legally obtained copies should be used.
 
-
-## What's different in Dekubi
-
-- green hat boy guard-house freeze fixed** (Texture Pool x2 built-in, a port of zortos293/Lichii#1313), also with Max Resolution on.
-- **Guard-house frame rate**: texture cache work from zortos293/Lichii#1314 (about 16 → 30–37 fps there while turning the camera on the test PC).
-- Movable, closable "Preparing shaders" side panel; custom PNG icons; green performance graph.
-- 30 FPS / 60 FPS mode switch and Dynamic FPS (in Add-Ons) for green hat boy.
-
 Compatibility and performance vary by game, hardware and driver. Rendering errors, stutters and crashes are still possible.
 
 ## Reporting a bug
