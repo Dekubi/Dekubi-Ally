@@ -36,7 +36,7 @@ Open an [issue](https://github.com/Dekubi/Dekubi-Ally/issues) with:
 - your settings and the steps to reproduce;
 - a screenshot and the log from that session (`user/log/eden_log.txt`), after checking it for personal information.
 
-Do not upload any files or account information.
+Do not upload any files or account information except your log and specs.
 
 ## Building
 
