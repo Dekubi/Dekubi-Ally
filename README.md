@@ -8,7 +8,7 @@
 
 # Dekubi Ally
 
-Dekubi Ally is an experimental, open-source Nintendo Switch and Switch 2 emulator, tuned for **The Legend of Zelda: Ocarina of Time** on the **ROG Ally Z1 Extreme** and on PCs with 4 GB VRAM / 8 GB RAM and up. It is a fork of Fritchii / Lichii, which build on Eglantine, Eden, yuzu and Sudachi.
+Dekubi Ally is an experimental, open-source emulator, tuned for **green hat boy** on the **ROG Ally Z1 Extreme** and on PCs with 4 GB VRAM / 8 GB RAM and up. It is a fork of Fritchii / Lichii, which build on Eglantine, Eden, yuzu and Sudachi.
 
 This is an independent hobby fork, not an official release of those projects, and it is not affiliated with Nintendo. I'm new to this, so expect some bugs; I'll do my best to fix them.
 
