@@ -1,0 +1,169 @@
+name: dekubi-linux
+
+# Linux x86_64 build of Dekubi Ally: an AppImage (self-contained) and a tar.gz (needs Qt 6 and the
+# usual libraries installed). Steps follow release-binaries.yml (inherited from upstream), which
+# builds the upstream targets and names instead of Dekubi's.
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+    paths:
+      - "src/**"
+      - "!src/tests/**"
+      - "CMakeLists.txt"
+      - "CMakeModules/**"
+      - "externals/**"
+      - "dist/**"
+      - ".patch/**"
+      - "cpmfile.json"
+      - "VERSION"
+      - ".github/workflows/dekubi-linux.yml"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: dekubi-linux-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    name: Linux x86_64
+    runs-on: ubuntu-24.04
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 3000M
+      CCACHE_COMPILERCHECK: content
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            autoconf cmake g++ gcc git glslang-tools libglu1-mesa-dev \
+            libpulse-dev libtool libudev-dev libxkbcommon-x11-0 \
+            mesa-common-dev nasm ninja-build qt6-base-private-dev \
+            qt6-charts-dev qt6-tools-dev libavfilter-dev libavcodec-dev \
+            libswscale-dev pkg-config zlib1g-dev libva-dev libvdpau-dev \
+            spirv-tools spirv-headers libusb-1.0-0-dev \
+            libboost-dev libboost-fiber-dev libboost-context-dev \
+            libopus-dev libasound2-dev ccache imagemagick \
+            libxcb-cursor0 libxcb-icccm4 libxcb-image0 \
+            libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 libxcb-xkb1
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: "6.8.3"
+          host: linux
+          target: desktop
+          arch: linux_gcc_64
+          modules: qtcharts
+          cache: true
+
+      - name: Restore dependency and compiler caches
+        uses: actions/cache@v4
+        with:
+          path: |
+            .cache/cpm
+            .ccache
+          key: dekubi-linux-${{ hashFiles('cpmfile.json', 'externals/cpmfile.json') }}-${{ github.sha }}
+          restore-keys: |
+            dekubi-linux-${{ hashFiles('cpmfile.json', 'externals/cpmfile.json') }}-
+            dekubi-linux-
+
+      - name: Configure
+        run: |
+          cmake -S . -B build/release -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_TESTING=OFF \
+            -DYUZU_TESTS=OFF \
+            -DYUZU_CMD=OFF \
+            -DYUZU_ROOM=OFF \
+            -DYUZU_ROOM_STANDALONE=OFF \
+            -DYUZU_USE_BUNDLED_QT=OFF \
+            "-DCMAKE_PREFIX_PATH=$QT_ROOT_DIR" \
+            -DYUZU_USE_BUNDLED_SDL3=ON \
+            -DVulkanHeaders_FORCE_BUNDLED=ON \
+            -DVulkanUtilityLibraries_FORCE_BUNDLED=ON \
+            -DENABLE_UPDATE_CHECKER=OFF \
+            -DLICHII_BUILD_PLATFORM=linux-x86_64 \
+            -DUSE_DISCORD_PRESENCE=OFF \
+            -DUSE_CCACHE=ON
+
+      - name: Build
+        run: |
+          ccache --zero-stats
+          cmake --build build/release --target dekubi --parallel
+          ccache --show-stats
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          version=$(tr -d '[:space:]' < VERSION)
+          bin=build/release/bin/dekubi
+          test -x "$bin"
+          strip "$bin"
+          # The program and what it reads next to itself; no shaders: each device builds its own
+          # from the recipe the Windows package ships.
+          pkg="$RUNNER_TEMP/Dekubi_Ally"
+          mkdir -p "$pkg"
+          cp "$bin" dist/nx2_switches.txt "$pkg/"
+          tar -czf "Dekubi_Ally-v${version}-linux-x86_64.tar.gz" -C "$RUNNER_TEMP" Dekubi_Ally
+
+          tools="$RUNNER_TEMP/linuxdeploy"
+          mkdir -p "$tools"
+          curl -fsSL -o "$tools/linuxdeploy-x86_64.AppImage" \
+            https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          curl -fsSL -o "$tools/linuxdeploy-plugin-qt-x86_64.AppImage" \
+            https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage
+          chmod +x "$tools"/*.AppImage
+          convert "dekubi.ico[0]" -resize 256x256 "$RUNNER_TEMP/dekubi.png"
+          cat > "$RUNNER_TEMP/dekubi.desktop" <<'DESKTOP'
+          [Desktop Entry]
+          Type=Application
+          Name=Dekubi Ally
+          Comment=Nintendo Switch and Switch 2 emulator tuned for Ocarina of Time
+          Exec=dekubi
+          Icon=dekubi
+          Categories=Game;Emulator;
+          DESKTOP
+          sed -i 's/^ *//' "$RUNNER_TEMP/dekubi.desktop"
+          export APPIMAGE_EXTRACT_AND_RUN=1
+          export QMAKE="$QT_ROOT_DIR/bin/qmake"
+          export EXTRA_QT_MODULES=waylandcompositor
+          export EXTRA_PLATFORM_PLUGINS='libqwayland-egl.so;libqwayland-generic.so'
+          export LDAI_VERSION="v${version}-${GITHUB_SHA::7}"
+          export LDAI_OUTPUT="Dekubi_Ally-v${version}-linux-x86_64.AppImage"
+          export OUTPUT="$LDAI_OUTPUT"
+          export ARCH=x86_64
+          "$tools/linuxdeploy-x86_64.AppImage" --appdir AppDir \
+            --executable "$bin" \
+            --desktop-file "$RUNNER_TEMP/dekubi.desktop" \
+            --icon-file "$RUNNER_TEMP/dekubi.png" \
+            --plugin qt \
+            --output appimage
+          test -s "$LDAI_OUTPUT"
+          ls -la Dekubi_Ally-*
+
+      - name: Upload build
+        uses: actions/upload-artifact@v4
+        with:
+          name: Dekubi_Ally-linux-x86_64-${{ github.sha }}
+          path: |
+            Dekubi_Ally-*.AppImage
+            Dekubi_Ally-*.tar.gz
+
+      - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 ||
+            gh release create "$GITHUB_REF_NAME" --title "Dekubi Ally $GITHUB_REF_NAME" --notes "Dekubi Ally $GITHUB_REF_NAME"
+          gh release upload "$GITHUB_REF_NAME" Dekubi_Ally-*.AppImage Dekubi_Ally-*.tar.gz --clobber
