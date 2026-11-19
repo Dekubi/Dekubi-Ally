@@ -1,3 +1,7 @@
+---
+trigger: always_on
+---
+
 # AGENTS
 
 See `docs/Coding.md` for technical coding guidance.
@@ -93,15 +97,14 @@ Use these before guessing. All are off unless the variable is set; pass them as 
 
 ## How work is split
 
-- One subagent per game, all running in parallel.
-- Small research (upstream PR and issue surveys, log reading): a cheap model, DeepSeek V4.1 Flash at max reasoning when its endpoint is available.
-- Hard fixes (emulation, shaders, GPU): GPT-6 Astra at high reasoning.
-- When a GPT-6 Astra subagent can't find the cause, switch that subagent to Claude Opus 5.5 at high reasoning.
-- The main thread (Opus) orchestrates and reviews.
+- Subagents run targeted investigations in parallel.
+- Small research (upstream PR and issue surveys, log reading): lightweight fast models.
+- Hard fixes (emulation, shaders, GPU): high-reasoning models.
+- The coordinator agent orchestrates and reviews.
 
 ## Builds
 
-- Cloud machines build with clang and Ninja for compile and unit-test checks.
+- All environments (cloud and local PC) must build with Clang (`clang` / `clang++` or `clang-cl` via LLVM) and Ninja. Do not use MSVC (`cl.exe` / MSBuild).
 - The build the owner tests runs on the owner's Windows PC (DESKTOP-4UD89UT, Ryzen 9 5900X), built with clang using 12 jobs (`cmake --build <dir> --parallel 12`).
 - On the PC the toolchain is clang-cl (LLVM 22) with the VS 2022 SDK, Qt 6.8.3 in `C:/lx/qt`, Ninja and sccache. Source is `C:/lx/src`, the persistent build dir is `C:/lx/build`, and `C:/lx/configure.sh` holds the configure flags. Build and package a fix with one command: `bash C:/lx/build-fix.sh <branch> <build-name> "<Game> - <fix>" ["ENV=VAL ..."] ["log filter"]`.
 - Every fix gets its own debug build on that PC in `C:\Users\Zortos\.capy\work\lichii-debug\<build>\` and a desktop shortcut `Lichii Debug - <Game> - <fix>` that launches it with the owner's existing user data and keeps the log next to the build, so the owner can run it and send the log back.

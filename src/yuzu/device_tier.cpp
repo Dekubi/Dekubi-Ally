@@ -107,6 +107,13 @@ std::vector<std::pair<std::string, std::string>> Defaults() {
             {"EDEN_NX2_WORKER_SPIN", "20"},
             {"FRITCHII_ONEF_AMD", "0"},
             {"FRITCHII_SMALL_CARD", "2"},
+            {"FRITCHII_TC_THRASH_GUARD", "1"},
+            {"FRITCHII_HOST_ZSTD", "3"},
+            {"FRITCHII_OCCL_FLAG", "3"},
+            {"FRITCHII_COVERED_RETIRE", "4"},
+            {"EDEN_NX2_HANDHELD_IGPU_LIMIT", "1300"},
+            {"EDEN_NX2_OOT_HIGH_REFRESH", "1"},
+            {"EDEN_NX2_OOT_HIGH_REFRESH_UNLIMITED", "1"},
         };
     }
     if (tier == "ally") {
@@ -124,6 +131,13 @@ std::vector<std::pair<std::string, std::string>> Defaults() {
             {"EDEN_NX2_WORKER_SPIN", "20"},
             {"FRITCHII_ONEF_AMD", "0"},
             {"FRITCHII_SMALL_CARD", "2"},
+            {"FRITCHII_TC_THRASH_GUARD", "1"},
+            {"FRITCHII_HOST_ZSTD", "3"},
+            {"FRITCHII_OCCL_FLAG", "3"},
+            {"FRITCHII_COVERED_RETIRE", "4"},
+            {"EDEN_NX2_HANDHELD_IGPU_LIMIT", "1300"},
+            {"EDEN_NX2_OOT_HIGH_REFRESH", "1"},
+            {"EDEN_NX2_OOT_HIGH_REFRESH_UNLIMITED", "1"},
         };
     }
     if (tier == "low") {
@@ -139,6 +153,13 @@ std::vector<std::pair<std::string, std::string>> Defaults() {
             {"FRITCHII_WORKER_SPIN", "20"},
             {"EDEN_NX2_WORKER_SPIN", "20"},
             {"FRITCHII_SMALL_CARD", "2"},
+            {"FRITCHII_TC_THRASH_GUARD", "1"},
+            {"FRITCHII_HOST_ZSTD", "3"},
+            {"FRITCHII_OCCL_FLAG", "3"},
+            {"FRITCHII_COVERED_RETIRE", "4"},
+            {"EDEN_NX2_HANDHELD_IGPU_LIMIT", "1300"},
+            {"EDEN_NX2_OOT_HIGH_REFRESH", "1"},
+            {"EDEN_NX2_OOT_HIGH_REFRESH_UNLIMITED", "1"},
         };
     }
     if (tier == "mid") {

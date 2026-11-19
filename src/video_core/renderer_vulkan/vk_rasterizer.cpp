@@ -2541,6 +2541,11 @@ void RasterizerVulkan::DispatchCompute() {
         const auto post_op = VideoCommon::ObtainBufferOperation::DiscardWrite;
         const auto [buffer, offset] =
             buffer_cache.ObtainBuffer(*indirect_address, 12, sync_info, post_op);
+        // An unmapped argument address gives the null buffer, which has no VkBuffer where the
+        // device has nullDescriptor: a dispatch would read GPU address 0. Nothing to run.
+        if (buffer == nullptr || buffer->Handle() == VK_NULL_HANDLE) [[unlikely]] {
+            return;
+        }
         scheduler.RequestOutsideRenderPassOperationContext();
         scheduler.NoteComputeWrites();
         scheduler.TraceComputePipeline(pipeline->ShaderHash());
