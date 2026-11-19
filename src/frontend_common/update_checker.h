@@ -66,9 +66,12 @@ std::optional<DekubiVersion> RunningVersion();
 // "dekubi-v4", "dekubi-v4.1", or the older "frizti-v3".
 std::optional<DekubiVersion> ParseDekubiTag(std::string_view tag);
 
-// "Dekubi-v4-Windows-x64.zip". Releases from before the rename named it differently and are
-// never installed.
+// The Windows package, "Dekubi_Ally_v1.1.2_Windows_x64.zip". Releases with other names are never
+// installed.
 std::string DekubiAssetName(const DekubiVersion& version);
+
+// The Linux AppImage, "Dekubi_Ally-v1.1.2-linux-x86_64.AppImage".
+std::string DekubiAppImageName(const DekubiVersion& version);
 
 // Where Dekubi releases are listed and downloaded from.
 struct Source {

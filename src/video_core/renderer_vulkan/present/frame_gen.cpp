@@ -202,17 +202,33 @@ void FrameGen::Process(const Device& device, Frame* frame, VkFormat format,
         shaders.emplace(device);
     }
 
-    if (unavailable || !Settings::FrameGenActive()) {
-        if (chain || fsr3_chain) {
+    const bool active = Settings::FrameGenActive();
+    const u32 multiplier = Settings::FrameGenMultiplier();
+    const auto type = Settings::values.frame_gen_type.GetValue();
+
+    if (unavailable || !active) {
+        if (chain || fsr3_chain || last_active) {
             scheduler.Finish();
             chain.reset();
             fsr3_chain.reset();
+            pacer.Reset();
+            last_active = false;
         }
         warm_streak = 0;
         return;
     }
 
-    if (!shaders->IsValid() && Settings::values.frame_gen_type.GetValue() != Settings::FrameGenType::Fsr3) {
+    if (!last_active || last_multiplier != multiplier) {
+        scheduler.Finish();
+        pacer.Reset();
+        warm_streak = 0;
+        last_active = true;
+        last_multiplier = multiplier;
+    }
+
+    const bool use_optical_flow = type != Settings::FrameGenType::Lsfg;
+
+    if (!shaders->IsValid() && !use_optical_flow) {
         unavailable = true;
         return;
     }
@@ -227,7 +243,8 @@ void FrameGen::Process(const Device& device, Frame* frame, VkFormat format,
 
     const VkExtent2D extent{.width = frame->width, .height = frame->height};
     const f32 flow_scale = ConfiguredFlowScale(peak_guest_extent, extent);
-    if ((!chain && !fsr3_chain) || built_extent.width != extent.width || built_extent.height != extent.height ||
+    if ((!chain && !fsr3_chain) || built_type != type ||
+        built_extent.width != extent.width || built_extent.height != extent.height ||
         built_format != format || built_flow_scale != flow_scale) {
         Rebuild(device, extent, format, flow_scale);
     }
@@ -240,11 +257,9 @@ void FrameGen::Process(const Device& device, Frame* frame, VkFormat format,
     warm_streak = warm ? warm_streak + 1 : 0;
     generated = warm && warm_streak >= LSFG_RECURRENCE_FRAMES && plan.generations > 0;
 
-    const bool use_fsr3 = Settings::values.frame_gen_type.GetValue() == Settings::FrameGenType::Fsr3;
-
-    if (use_fsr3 && fsr3_chain) {
+    if (use_optical_flow && fsr3_chain) {
         scheduler.RequestOutsideRenderPassOperationContext();
-        fsr3_chain->Process(device, scheduler, *frame->image, *frame->storage_view, count);
+        fsr3_chain->Process(device, scheduler, *frame->image, count);
     } else if (chain) {
         scheduler.RequestOutsideRenderPassOperationContext();
         scheduler.Record([this, source = *frame->image, extent, count,
@@ -266,9 +281,14 @@ void FrameGen::Process(const Device& device, Frame* frame, VkFormat format,
 }
 
 size_t FrameGen::WantedGenerations(size_t capacity) {
-    if (unavailable) {
+    if (unavailable || !Settings::FrameGenActive()) {
         plan = {};
         return 0;
+    }
+    const u32 multiplier = Settings::FrameGenMultiplier();
+    if (last_multiplier != multiplier) {
+        pacer.Reset();
+        last_multiplier = multiplier;
     }
     plan = pacer.Plan(capacity);
     return plan.generations;
@@ -279,14 +299,15 @@ size_t FrameGen::GeneratedFrameCount() const {
 }
 
 void FrameGen::GenerateInto(const Device& device, Frame* destination, size_t generation) {
-    const bool use_fsr3 = Settings::values.frame_gen_type.GetValue() == Settings::FrameGenType::Fsr3;
+    const bool use_optical_flow =
+        Settings::values.frame_gen_type.GetValue() != Settings::FrameGenType::Lsfg;
 
-    if (use_fsr3 && fsr3_chain) {
+    if (use_optical_flow && fsr3_chain) {
         const f32 blend = static_cast<f32>(generation + 1) / static_cast<f32>(last_generations + 1);
         const f32 flow_scale = ConfiguredFlowScale(peak_guest_extent, built_extent);
 
         scheduler.RequestOutsideRenderPassOperationContext();
-        fsr3_chain->Generate(device, scheduler, *destination->storage_view, blend, flow_scale);
+        fsr3_chain->Generate(device, scheduler, destination->index, *destination->storage_view, blend, flow_scale);
     } else if (chain) {
         chain->SetTarget(device, last_generations, generation, destination->index,
                          *destination->storage_view);
@@ -308,9 +329,10 @@ void FrameGen::Rebuild(const Device& device, VkExtent2D extent, VkFormat format,
     chain.reset();
     fsr3_chain.reset();
 
+    built_type = Settings::values.frame_gen_type.GetValue();
     built_flow_scale = flow_scale;
 
-    if (Settings::values.frame_gen_type.GetValue() == Settings::FrameGenType::Fsr3) {
+    if (built_type != Settings::FrameGenType::Lsfg) {
         fsr3_chain.emplace(device, memory_allocator, extent, format);
     } else {
         chain.emplace(device, memory_allocator, *shaders, extent, format, built_flow_scale);

@@ -288,7 +288,122 @@ DlssFiles FindDlssFiles() {
     files.interposer_version = VersionText(files.interposer);
     files.model_version = VersionText(files.model);
     files.app_model_version = VersionText(files.app_model);
+
+    const std::string chosen = Settings::values.nvidia_dlss_version.GetValue();
+    if (!chosen.empty() && chosen != "auto") {
+        for (const auto& m : GetAvailableDlssModels()) {
+            if (m.id == chosen) {
+                files.active_version_name = m.name;
+                if (!m.version.empty()) {
+                    files.model_version = m.version;
+                }
+                break;
+            }
+        }
+    }
+
     return files;
+}
+
+std::vector<DlssModelEntry> GetAvailableDlssModels() {
+    std::vector<DlssModelEntry> models;
+    DlssFiles files;
+    files.folder = UserFolder();
+    std::error_code ec;
+    for (const std::filesystem::path& dir : SearchDirs()) {
+        if (std::filesystem::is_regular_file(dir / INTERPOSER, ec)) {
+            files.folder = dir;
+            files.interposer = dir / INTERPOSER;
+            break;
+        }
+    }
+    if (std::filesystem::is_regular_file(files.folder / MODEL, ec)) {
+        files.model = files.folder / MODEL;
+    }
+    files.app_model = FindAppModel();
+    files.model_version = VersionText(files.model);
+    files.app_model_version = VersionText(files.app_model);
+
+    std::string auto_ver = files.app_model_version;
+    if (auto_ver.empty()) {
+        auto_ver = files.model_version;
+    }
+    models.push_back({
+        .id = "auto",
+        .name = auto_ver.empty() ? "Auto (Newest / NVIDIA App)"
+                                 : fmt::format("Auto (DLSS {})", auto_ver),
+        .version = auto_ver,
+        .path = !files.model.empty() ? files.model : files.app_model,
+        .ready = !files.model.empty() || !files.app_model.empty(),
+    });
+
+    // Scan user/streamline/versions
+    const std::filesystem::path versions_dir = UserFolder() / "versions";
+    if (std::filesystem::is_directory(versions_dir, ec)) {
+        for (const auto& entry : std::filesystem::directory_iterator(versions_dir, ec)) {
+            const auto& path = entry.path();
+            if (entry.is_directory(ec)) {
+                const auto target = path / MODEL;
+                const bool has_dll = std::filesystem::is_regular_file(target, ec);
+                const std::string ver = has_dll ? VersionText(target) : std::string{};
+                const std::string stem = Common::FS::PathToUTF8String(path.filename());
+                const std::string display_stem = stem == "DLSS 5" ? "DLSS 5 (Experimental)" : stem;
+                models.push_back({
+                    .id = stem,
+                    .name = has_dll
+                                ? (ver.empty() ? display_stem : fmt::format("{} ({})", display_stem, ver))
+                                : fmt::format("{} (empty - drop nvngx_dlss.dll here)", display_stem),
+                    .version = ver,
+                    .path = path,
+                    .ready = has_dll,
+                });
+            } else if (entry.is_regular_file(ec) && path.extension() == L".dll") {
+                const std::string ver = VersionText(path);
+                const std::string stem = Common::FS::PathToUTF8String(path.stem());
+                models.push_back({
+                    .id = stem,
+                    .name = ver.empty() ? stem : fmt::format("{} ({})", stem, ver),
+                    .version = ver,
+                    .path = path,
+                    .ready = true,
+                });
+            }
+        }
+    }
+
+    // Also scan NVIDIA App versions if available
+    const wchar_t* const program_data = _wgetenv(L"ProgramData");
+    if (program_data) {
+        const std::filesystem::path root = std::filesystem::path{program_data} / L"NVIDIA" /
+                                           L"NGX" / L"models" / L"dlss" / L"versions";
+        std::error_code ota_ec;
+        for (const auto& version_dir : std::filesystem::directory_iterator(root, ota_ec)) {
+            std::error_code files_ec;
+            for (const auto& file :
+                 std::filesystem::directory_iterator(version_dir.path() / L"files", files_ec)) {
+                if (file.path().extension() != L".bin") {
+                    continue;
+                }
+                const std::optional<Version> version = ReadVersion(file.path());
+                if (version && (*version)[0] >= MIN_DLSS_MAJOR) {
+                    const std::string ver_str = VersionText(file.path());
+                    const std::string id = "ota:" + Common::FS::PathToUTF8String(version_dir.path().filename());
+                    if (std::none_of(models.begin(), models.end(), [&](const auto& m) { return m.id == id; })) {
+                        models.push_back({
+                            .id = id,
+                            .name = fmt::format("NVIDIA App OTA {}", ver_str),
+                            .version = ver_str,
+                            .path = file.path(),
+                            .ready = true,
+                        });
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    return models;
 }
 
 bool Start() {
@@ -301,11 +416,6 @@ bool Start() {
     }
     if (!state.module) {
         const DlssFiles files = FindDlssFiles();
-        if (!files.model.empty() && !IsSignedByNvidia(files.model)) {
-            LOG_WARNING(Render_Vulkan, "DLSS model {} is not signed by NVIDIA; using FSR 3.1",
-                        Common::FS::PathToUTF8String(files.model));
-            return false;
-        }
         if (files.interposer.empty()) {
             LOG_WARNING(Render_Vulkan,
                         "NVIDIA DLSS is on, but sl.interposer.dll (NVIDIA Streamline) is not in "
@@ -318,14 +428,56 @@ bool Start() {
         }
         state.plugin_dir = files.folder.wstring();
         state.model_dir.clear();
-        if (files.model.empty() && !files.app_model.empty()) {
-            if (const std::filesystem::path dir = UseAppModel(files); !dir.empty()) {
-                state.model_dir = dir.wstring();
-                LOG_INFO(Render_Vulkan, "Using the NVIDIA app's DLSS {}", files.app_model_version);
+
+        const std::string chosen = Settings::values.nvidia_dlss_version.GetValue();
+        std::filesystem::path custom_path;
+        if (!chosen.empty() && chosen != "auto") {
+            for (const auto& m : GetAvailableDlssModels()) {
+                if (m.id == chosen && m.ready) {
+                    custom_path = m.path;
+                    break;
+                }
             }
-        } else if (files.model.empty()) {
-            LOG_WARNING(Render_Vulkan, "No nvngx_dlss.dll in {} and no DLSS from the NVIDIA app",
-                        Common::FS::PathToUTF8String(files.folder));
+        }
+
+        if (!custom_path.empty()) {
+            std::error_code ec;
+            if (std::filesystem::is_directory(custom_path, ec)) {
+                const auto target = custom_path / MODEL;
+                if (std::filesystem::is_regular_file(target, ec) && IsSignedByNvidia(target)) {
+                    state.model_dir = custom_path.wstring();
+                    LOG_INFO(Render_Vulkan, "Using custom DLSS '{}' from {}", chosen,
+                             Common::FS::PathToUTF8String(custom_path));
+                }
+            } else if (std::filesystem::is_regular_file(custom_path, ec)) {
+                const auto active_dir = UserFolder() / L"active";
+                const auto target = active_dir / MODEL;
+                std::filesystem::create_directories(active_dir, ec);
+                std::filesystem::copy_file(custom_path, target,
+                                           std::filesystem::copy_options::overwrite_existing, ec);
+                if (!ec && IsSignedByNvidia(target)) {
+                    state.model_dir = active_dir.wstring();
+                    LOG_INFO(Render_Vulkan, "Using staged custom DLSS '{}' from {}", chosen,
+                             Common::FS::PathToUTF8String(custom_path));
+                }
+            }
+        }
+
+        if (state.model_dir.empty()) {
+            if (!files.model.empty() && !IsSignedByNvidia(files.model)) {
+                LOG_WARNING(Render_Vulkan, "DLSS model {} is not signed by NVIDIA; using FSR 3.1",
+                            Common::FS::PathToUTF8String(files.model));
+                return false;
+            }
+            if (files.model.empty() && !files.app_model.empty()) {
+                if (const std::filesystem::path dir = UseAppModel(files); !dir.empty()) {
+                    state.model_dir = dir.wstring();
+                    LOG_INFO(Render_Vulkan, "Using the NVIDIA app's DLSS {}", files.app_model_version);
+                }
+            } else if (files.model.empty()) {
+                LOG_WARNING(Render_Vulkan, "No nvngx_dlss.dll in {} and no DLSS from the NVIDIA app",
+                            Common::FS::PathToUTF8String(files.folder));
+            }
         }
     }
 

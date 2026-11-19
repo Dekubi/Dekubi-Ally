@@ -227,3 +227,9 @@ QToolButton#FritchiiTile {
     font-size: 13px;
 }
 QToolButton#FritchiiTile:hover { background: #1b1b1f; color: #ececf1; }
+
+/* Switches window */
+QLabel#DekubiSwitchesSection { font-size: 16px; font-weight: 600; color: #ececf1; }
+QTextEdit#DekubiSwitchesInUse { background: #141417; color: #c9c9d3; }
+QLabel#DekubiSwitchesProblems { color: #f87171; font-size: 15px; }
+QLabel#DekubiSwitchesSaved { color: #a78bfa; font-size: 15px; }

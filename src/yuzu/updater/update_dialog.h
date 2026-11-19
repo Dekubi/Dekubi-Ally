@@ -34,6 +34,8 @@ private:
     void SaveToFolder();
 #ifdef _WIN32
     void InstallInPlace();
+#elif defined(__linux__)
+    void ReplaceAppImage();
 #endif
     bool DownloadTo(const QString& filename);
 
@@ -51,7 +53,8 @@ namespace Updater {
 // environment that a restart uses.
 void PrepareLaunch();
 
-// Whether this build can replace its own files: a Dekubi build on Windows run as lichii.exe.
+// Whether this build can replace its own files: a Dekubi build on Windows run as dekubi.exe, or
+// one run from its AppImage on Linux.
 bool CanInstallInPlace();
 
 // At startup: finish or undo a swap that was interrupted, and remove the staging folder. Returns
@@ -63,7 +66,7 @@ std::optional<QString> RollbackVersion();
 
 void RollBack(QWidget* window);
 
-// Start lichii.exe in the install folder again, with the current arguments minus any game, and
+// Start dekubi.exe in the install folder (or the AppImage) again, with the current arguments minus any game, and
 // close `window`. The new process shows `note` once it is up.
 bool Restart(QWidget* window, const QString& note = {});
 

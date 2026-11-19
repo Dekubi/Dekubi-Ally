@@ -74,9 +74,12 @@ size_t BytesPerIndex(VkIndexType index_type) {
         return 1;
     }
 }
+} // Anonymous namespace
 
-vk::Buffer CreateBuffer(const Device& device, const MemoryAllocator& memory_allocator, u64 size,
-                        VkDeviceSize sparse_alignment) {
+vk::Buffer Buffer::CreateBuffer(BufferCacheRuntime& runtime, u64 size,
+                                VkDeviceSize sparse_alignment) {
+    const Device& device = runtime.device;
+    MemoryAllocator& memory_allocator = runtime.memory_allocator;
     VkBufferUsageFlags flags =
         VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
         VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT |
@@ -106,12 +109,21 @@ vk::Buffer CreateBuffer(const Device& device, const MemoryAllocator& memory_allo
         .pQueueFamilyIndices = nullptr,
     };
     if (sparse_alignment > 1) {
-        return memory_allocator.CreateBuffer(buffer_ci, MemoryUsage::DeviceLocal, sparse_alignment);
+        vk::Buffer buf = memory_allocator.TryCreateBuffer(buffer_ci, MemoryUsage::DeviceLocal, sparse_alignment);
+        if (!buf) {
+            runtime.staging_pool.ReleaseMemory();
+            buf = memory_allocator.CreateBuffer(buffer_ci, MemoryUsage::DeviceLocal, sparse_alignment);
+        }
+        return buf;
     }
-    return memory_allocator.CreateBuffer(
-        buffer_ci, device.IsMoltenVK() ? MemoryUsage::Stream : MemoryUsage::DeviceLocal);
+    const MemoryUsage usage = device.IsMoltenVK() ? MemoryUsage::Stream : MemoryUsage::DeviceLocal;
+    vk::Buffer buf = memory_allocator.TryCreateBuffer(buffer_ci, usage);
+    if (!buf) {
+        runtime.staging_pool.ReleaseMemory();
+        buf = memory_allocator.CreateBuffer(buffer_ci, usage);
+    }
+    return buf;
 }
-} // Anonymous namespace
 
 Buffer::Buffer(BufferCacheRuntime& runtime, VideoCommon::NullBufferParams null_params)
     : VideoCommon::BufferBase(null_params), scheduler{&runtime.scheduler}, tracker{4096} {
@@ -130,7 +142,7 @@ Buffer::Buffer(BufferCacheRuntime& runtime, DAddr cpu_addr_, u64 size_bytes_,
                bool sparse_compatible_)
     : VideoCommon::BufferBase(cpu_addr_, size_bytes_), device{&runtime.device},
       scheduler{&runtime.scheduler},
-      buffer{CreateBuffer(*device, runtime.memory_allocator, SizeBytes(),
+      buffer{CreateBuffer(runtime, SizeBytes(),
                           runtime.SparseAlignmentFor(sparse_compatible_))},
       tracker{SizeBytes()} {
     sparse_compatible = sparse_compatible_;

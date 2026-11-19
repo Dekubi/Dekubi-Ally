@@ -57,7 +57,9 @@ static const std::map<Settings::DlssPreset, QString> nvidia_dlss_preset_texts_ma
 
 static const std::map<Settings::FrameGenType, QString> frame_gen_type_texts_map = {
     {Settings::FrameGenType::Lsfg, QStringLiteral(QT_TRANSLATE_NOOP("MainWindow", "LSFG"))},
-    {Settings::FrameGenType::Fsr3, QStringLiteral(QT_TRANSLATE_NOOP("MainWindow", "Optical Flow"))},
+    {Settings::FrameGenType::Fsr3, QStringLiteral(QT_TRANSLATE_NOOP("MainWindow", "AMD FSR 3.1 FG"))},
+    {Settings::FrameGenType::DlssG, QStringLiteral(QT_TRANSLATE_NOOP("MainWindow", "DLSS-G"))},
+    {Settings::FrameGenType::XessFg, QStringLiteral(QT_TRANSLATE_NOOP("MainWindow", "XeSS-FG"))},
 };
 
 static const std::map<Settings::ScalingFilter, QString> scaling_filter_texts_map = {
@@ -83,6 +85,7 @@ static const std::map<Settings::ScalingFilter, QString> scaling_filter_texts_map
     {Settings::ScalingFilter::Sgsr, QStringLiteral(QT_TRANSLATE_NOOP("MainWindow", "SGSR"))},
     {Settings::ScalingFilter::SgsrEdge, QStringLiteral(QT_TRANSLATE_NOOP("MainWindow", "SGSR EdgeDir"))},
     {Settings::ScalingFilter::Fsr3, QStringLiteral(QT_TRANSLATE_NOOP("MainWindow", "FSR 1 Soft"))},
+    {Settings::ScalingFilter::Xess, QStringLiteral(QT_TRANSLATE_NOOP("MainWindow", "XeSS"))},
 };
 
 static const std::map<Settings::ConsoleMode, QString> use_docked_mode_texts_map = {

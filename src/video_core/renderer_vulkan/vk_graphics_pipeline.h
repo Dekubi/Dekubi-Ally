@@ -144,6 +144,7 @@ public:
     static std::chrono::nanoseconds HoldTimeTotal() noexcept;
 
     bool HasDynamicVertexInput() const noexcept { return key.state.dynamic_vertex_input; }
+    u64 DynamicAttributeTypes() const noexcept { return key.state.attribute_types; }
     const std::array<u64, 6>& ShaderHashes() const noexcept {
         return key.unique_hashes;
     }
@@ -300,12 +301,77 @@ public:
         transitions.clear();
     }
 
+    [[nodiscard]] bool WritesStorage() const noexcept {
+        return writes_storage;
+    }
+
+    /// Writes storage images or image buffers (their images are marked modified when resolved).
+    [[nodiscard]] bool WritesImages() const noexcept {
+        return writes_images;
+    }
+
     [[nodiscard]] bool IsBuilt() const noexcept {
         return build->IsBuilt();
     }
 
     [[nodiscard]] bool Failed() const noexcept {
         return build->Failed();
+    }
+
+    /// Fast draw (nx2_fast_draw.h): whether draws can keep the image views and samplers the last
+    /// captured Configure resolved. Handles computed at draw time are evaluated again for each
+    /// delta draw (ComputedHandlesChanged).
+    [[nodiscard]] bool TakesDeltaDraws() const noexcept {
+        return DeltaDrawBlocker() == DeltaBlocker::None;
+    }
+
+    /// Whether a handle the last captured Configure computed at draw time (a handle program, which
+    /// reads constant and storage buffers) evaluates to another value now: a delta draw would keep
+    /// views and samplers resolved from the old one.
+    [[nodiscard]] bool ComputedHandlesChanged() const;
+
+    /// Why TakesDeltaDraws is false (diagnostics).
+    enum class DeltaBlocker : u8 {
+        None,
+        WritesImages,
+        Mesh,
+        ComputedHandles, ///< Dekubi: only with EDEN_NX2_EXP65=0
+        NotConfigured,
+        Count,
+    };
+    [[nodiscard]] DeltaBlocker DeltaDrawBlocker() const noexcept;
+
+    /// Constant buffer slots per stage the pipeline reads texture and image handles from.
+    [[nodiscard]] const std::array<u32, NUM_STAGES>& HandleConstantBuffers() const noexcept {
+        return handle_constant_buffers;
+    }
+
+    /// The bytes [first, second) of a HandleConstantBuffers slot that handles are read from.
+    [[nodiscard]] std::pair<u32, u32> HandleRange(size_t stage, u32 slot) const noexcept {
+        return handle_ranges[stage][slot];
+    }
+
+    /// The same bytes word by word: sorted, disjoint ranges within HandleRange.
+    [[nodiscard]] std::span<const std::pair<u32, u32>> HandleWords(size_t stage,
+                                                                   u32 slot) const noexcept {
+        const auto [first, count] = handle_word_index[stage][slot];
+        return std::span{handle_words}.subspan(first, count);
+    }
+
+    /// Resolves and binds every buffer as Configure does (storage buffer addresses are read from
+    /// the constant buffers again) and records the draw's descriptors with the image views,
+    /// samplers and texture buffers the last captured Configure resolved. False when the draw
+    /// can't be recorded, as for Configure.
+    bool ConfigureDelta(bool is_indexed);
+
+    /// The next Configure keeps the views and samplers it resolves for delta draws. With
+    /// `verify`, it first compares them with the ones kept before; DeltaMismatch reports it.
+    void CaptureNextDelta(bool verify) noexcept {
+        capture_delta = true;
+        verify_delta = verify;
+    }
+    [[nodiscard]] bool DeltaMismatch() const noexcept {
+        return delta_mismatch;
     }
 
     template <typename Spec>
@@ -443,6 +509,39 @@ private:
     vk::Pipeline fragment_output_library;
     vk::DescriptorSetLayout fallback_empty_set_layout;
     bool linked{};
+    bool writes_images{};
+
+    DeltaBlocker delta_blocker{};
+    bool delta_views_valid{};
+    bool capture_delta{};
+    bool verify_delta{};
+    bool delta_mismatch{};
+    std::array<bool, NUM_STAGES> configured_stages{};
+    std::array<u32, NUM_STAGES> handle_constant_buffers{};
+    std::array<std::array<std::pair<u32, u32>, Tegra::Engines::Maxwell3D::Regs::MaxConstBuffers>,
+               NUM_STAGES>
+        handle_ranges{};
+    std::vector<std::pair<u32, u32>> handle_words;
+    std::array<std::array<std::pair<u16, u16>, Tegra::Engines::Maxwell3D::Regs::MaxConstBuffers>,
+               NUM_STAGES>
+        handle_word_index{};
+    std::vector<VideoCommon::ImageViewInOut> delta_views;
+    std::vector<VideoCommon::SamplerId> delta_samplers;
+    /// A descriptor whose handles the captured Configure computed at draw time: the descriptor
+    /// (stage, kind as ComputedHandleKind, index in its list) and its elements' values, count of
+    /// them from delta_computed_values[first_value].
+    struct ComputedHandle {
+        u8 stage;
+        u8 kind;
+        u16 descriptor;
+        u32 count;
+        u32 first_value;
+    };
+    enum ComputedHandleKind : u8 { TextureBuffer, ImageBuffer, Texture, Image };
+    std::vector<ComputedHandle> delta_computed_handles;
+    std::vector<u32> delta_computed_values;
+    /// A handle program computes some handle (EXP65 0 blocks delta draws then).
+    bool has_computed_handles{};
 
     vk::DescriptorSetLayout descriptor_set_layout;
     DescriptorAllocator descriptor_allocator;

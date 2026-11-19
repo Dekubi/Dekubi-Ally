@@ -42,6 +42,7 @@ struct MenuHooks {
     std::function<void()> export_log;
     std::function<void()> whats_new;
     std::function<void()> delete_shader_cache; ///< OoT's, after a confirmation
+    std::function<void()> switches;            ///< live switches editor
 };
 /// Plain names and Dekubi's grouping for the classic menus (File, Game, View, Tools, Help).
 void RestructureMenus(Ui::MainWindow& ui, QMainWindow& window, const MenuHooks& hooks);

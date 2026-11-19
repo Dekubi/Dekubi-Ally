@@ -180,7 +180,9 @@ void DmaPusher::DispatchCalls() {
     }();
     if (invalidate_at_list) {
         if (auto& split = VideoCommon::GpuSplit::Get(); split.Active()) {
-            split.Defer([gpu = &system.GPU()] { gpu->InvalidateGPUCache(); });
+            split.Defer([gpu = &system.GPU()] { gpu->InvalidateGPUCache(); },
+                        VideoCommon::GpuSplit::Effect::Unknown,
+                        VideoCommon::GpuSplit::CallTag(VideoCommon::Nx2FastDraw::CallSite::Invalidate));
         } else {
             system.GPU().InvalidateGPUCache();
         }
@@ -199,7 +201,8 @@ void DmaPusher::DispatchCalls() {
                 gpu->FlushCommands();
                 gpu->OnCommandListEnd();
             },
-            VideoCommon::GpuSplit::Effect::None);
+            VideoCommon::GpuSplit::Effect::None,
+            VideoCommon::GpuSplit::CallTag(VideoCommon::Nx2FastDraw::CallSite::ListEnd));
         split.Publish();
         return;
     }
@@ -299,7 +302,7 @@ bool DmaPusher::Step() {
                          address = GPUVAddr{dma_state.dma_get}, bytes = words * sizeof(u32)] {
                             engine_state->current_dirty = memory->IsMemoryDirty(address, bytes);
                         },
-                        VideoCommon::GpuSplit::Effect::None);
+                        VideoCommon::GpuSplit::Effect::None, VideoCommon::GpuSplit::FastDrawNeutral);
                 } else {
                     engine_state->current_dirty = memory_manager.IsMemoryDirty(dma_state.dma_get, words * sizeof(u32));
                 }
@@ -393,7 +396,11 @@ bool DmaPusher::Step() {
                                              : "waited for the writers before the last sync");
                         }
                     }
-                });
+                },
+                // EXP64: reads and logs only.
+                VideoCommon::GpuSplit::Effect::Unknown,
+                VideoCommon::GpuSplit::CallTag(VideoCommon::Nx2FastDraw::CallSite::ListCheck) |
+                    VideoCommon::GpuSplit::QueryNeutral());
             }
         }
         // Resume and GPU-written entries need live words, even after a flush cleared dirty state.
@@ -969,7 +976,8 @@ bool DmaPusher::ReadGpuWrittenCommands(GPUVAddr address, u32 count) {
                         split.Defer([page, begin = static_cast<u32>(*device - page),
                                      end = static_cast<u32>(*device - page + part.size())] {
                             Nx2CmdPageDiag::CheckMissedWrite(page, begin, end);
-                        });
+                        },
+                        VideoCommon::GpuSplit::Effect::Unknown, VideoCommon::GpuSplit::FastDrawNeutral);
                     }
                 } else {
                     diag.reads_unknown.fetch_add(1, std::memory_order_relaxed);

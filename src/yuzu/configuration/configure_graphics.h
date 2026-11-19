@@ -27,6 +27,7 @@ class QEvent;
 class QObject;
 class QComboBox;
 class AmdFsr4Panel;
+class IntelXessPanel;
 
 namespace Settings {
 enum class NvdecEmulation : u32;
@@ -73,6 +74,7 @@ private:
     void UpdateAPILayout();
     void UpdateDeviceSelection(int device);
     void UpdateAmdFsr4Visibility();
+    void UpdateIntelXessVisibility();
 
     void RetrieveVulkanDevices();
 
@@ -114,5 +116,9 @@ private:
     QComboBox* resolution_combobox;
     QComboBox* oot_aa_combobox{};          ///< The oot_anti_aliasing choice
     AmdFsr4Panel* amd_fsr4_panel{};       ///< Under it while AMD FSR 4 is picked
+    IntelXessPanel* intel_xess_panel{};   ///< Under it while Intel XeSS is picked
+    QLabel* filter_note{};
+    QComboBox* scaling_filter_combobox{};
+    void UpdateWindowFilterNote();
 };
 

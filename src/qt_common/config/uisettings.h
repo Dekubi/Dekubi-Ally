@@ -148,6 +148,8 @@ struct Values {
     // The Dekubi version whose "What's new" window was shown (dekubi/dekubi/whats_new.cpp).
     Setting<std::string> dekubi_whats_new_seen{linkage, {}, "dekubi_whats_new_seen",
                                                  Category::Ui};
+    // Whether the 8 GB virtual memory notice has been shown (dekubi/main_window_dekubi.cpp).
+    Setting<bool> pagefile_notice_shown{linkage, false, "pagefile_notice_shown", Category::Ui};
 
     // Linux/MinGW may support (requires libdl support)
     SwitchableSetting<bool> enable_gamemode{linkage,
@@ -232,6 +234,7 @@ struct Values {
 
     // perf overlay
     Setting<bool> show_perf_overlay{linkage, false, "show_perf_overlay", Category::UiGameList};
+    Setting<bool> perf_overlay_times{linkage, true, "perf_overlay_times", Category::Ui};
 
     // Size & File Types Column
     Setting<bool> show_size{linkage, true, "show_size", Category::UiGameList};

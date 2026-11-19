@@ -97,7 +97,7 @@ inline std::atomic<int> g_arb_spin{-1};
 /// every Idle.
 inline std::atomic<int> g_idle_pause{-1};
 
-/// Numbered experiment switches EDEN_NX2_EXP0 .. EDEN_NX2_EXP63, live through the debug server:
+/// Numbered experiment switches EDEN_NX2_EXP0 .. EDEN_NX2_EXP71, live through the debug server:
 /// slots for batches of fixes built together and A/B-tested in one session
 /// (E:\OotRemakeEmulation\work\EXPERIMENTS.md lists which fix uses which slot). 0 = off.
 /// EXP8 (texture upload hitches), bits: 1 = keep idle upload staging buffers up to 32 MiB
@@ -359,7 +359,9 @@ inline std::atomic<int> g_idle_pause{-1};
 /// prove 2 shows 0 differ first (under EXP19=2 without EXP50, blend writes without
 /// Dirty::Blending already leave the clean lookup's attachments stale, and verify reports that
 /// too), then compare the lookup zone with profile_toggle (EXP52 0 vs 1).
-inline constexpr int ExperimentCount = 64;
+/// EXP47 = 1: transient render-target purge (zortos293/Lichii#1285; TextureCache::EvictDeadRenderTargets).
+/// Deletes dead render targets early while the cache is over expected memory. Off by default.
+inline constexpr int ExperimentCount = 72;
 inline std::atomic<int> g_experiments[ExperimentCount]{};
 
 inline void LoadExperiments() {
@@ -425,14 +427,43 @@ inline void LoadExperiments() {
         // the last submit. Castle Town live toggle: empty submits 4,600 -> 145 a second, 43.0 ->
         // 45.6 fps (3 of 4 pairs, the 4th a tie), GPU thread split drain 432 -> 396 ms/s.
         g_experiments[61].store(1, std::memory_order_relaxed);
+        // EXP52 = 1: when only bound programs changed, reuse cached state and avoid FixedPipelineState::Refresh.
+        g_experiments[52].store(1, std::memory_order_relaxed);
+        // EXP11 = 1 (2026-11-17): Ocarina's occlusion report reads (MME DMA, ~38,000/s) take the
+        // snapshot path, not FrontDmaReadEarly's wait for the pages' last writer. Kakariko at
+        // night, 4 alternating rounds: 25.7 -> 28.0 fps, each round won.
+        g_experiments[11].store(1, std::memory_order_relaxed);
         // EXP49 = 1 (2026-11-10, owner's call for v5.7): the async read-back. Stalchild fight,
         // flipped every 30 s while the owner fought: 51.9 -> 56.9 fps, the back's read flushes
         // 35 -> 6 ms/s, guest lock waits halved. No beams in that session or two later ones
         // played with it on from boot.
         g_experiments[49].store(1, std::memory_order_relaxed);
+        // EXP15 = 1: fast draws (zortos293/Lichii#858, nx2_fast_draw.h): a draw after only light
+        // state changes keeps the previous draw's pipeline, views and samplers. On in Lichii;
+        // 0 resolves every draw in full (A/B).
+        g_experiments[15].store(1, std::memory_order_relaxed);
+        // EXP64 = 1: occlusion query work keeps fast draw reuse, full deltas widen (#1403).
+        g_experiments[64].store(1, std::memory_order_relaxed);
+        // EXP65 = 1: #1519's delta draws for computed handles, handle words and vertex formats.
+        g_experiments[65].store(1, std::memory_order_relaxed);
+        // EXP66 = 1: vertex stream strides and MME read addresses keep reuse (#974/#1216).
+        g_experiments[66].store(1, std::memory_order_relaxed);
+        // EXP67 = 1: unbuilt compute whose outputs hold GPU results waits 8 ms/frame, then skips (#2104).
+        g_experiments[67].store(1, std::memory_order_relaxed);
+        // The rest of #858, on as in Lichii; 0 restores Dekubi's code at that site.
+        // EXP20 = 1: direct draws with nothing to draw are skipped before PrepareDraw.
+        g_experiments[20].store(1, std::memory_order_relaxed);
+        // EXP38 = 1: SynchronizeAliases returns early while no alias is newer (newest_alias_tick).
+        g_experiments[38].store(1, std::memory_order_relaxed);
+        // EXP44 = 1: index and vertex ranges skip the upload scan until a CPU write reaches them.
+        g_experiments[44].store(1, std::memory_order_relaxed);
+        // EXP46 = 1: WordManager::ForEachModifiedRange returns early for words with nothing to do.
+        g_experiments[46].store(1, std::memory_order_relaxed);
         // EXP39 = 3: publish to a back that waits after 8 words, no snapshot refresh of entries
         // that ran (zortos293/Lichii#805 62db242b34; see the EXP39 notes above). Timing only.
         g_experiments[39].store(3, std::memory_order_relaxed);
+        // EXP47 = 0: transient render-target purge (Lichii #1285, off by default for in-game A/B testing).
+        g_experiments[47].store(0, std::memory_order_relaxed);
         for (int n = 0; n < ExperimentCount; ++n) {
             const std::string name = "EDEN_NX2_EXP" + std::to_string(n);
             if (const char* value = std::getenv(name.c_str())) {

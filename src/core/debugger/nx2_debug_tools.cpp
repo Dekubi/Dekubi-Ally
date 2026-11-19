@@ -585,6 +585,149 @@ json SearchMemory(ToolState& state, const json& params) {
     return result;
 }
 
+// A cheat-finder scan over the heap: "start" keeps every aligned value of the given size and type
+// that equals value; "next" keeps the ones that now equal value, or that changed, stayed,
+// decreased or increased since the last step. Finds the addresses behind game values (health,
+// rupees, ammo) for the mod menu. One scan at a time, kept between calls.
+struct MemoryScan {
+    std::vector<u64> addresses;
+    std::vector<u64> values;
+    u32 size = 4;
+    bool is_float = false;
+};
+
+MemoryScan& CurrentScan() {
+    static MemoryScan scan;
+    return scan;
+}
+
+u64 ReadScanValue(const u8* pointer, u32 size) {
+    u64 value = 0;
+    std::memcpy(&value, pointer, size);
+    return value;
+}
+
+double ScanNumber(u64 raw, const MemoryScan& scan) {
+    if (scan.is_float) {
+        if (scan.size == 4) {
+            float f;
+            const u32 bits = static_cast<u32>(raw);
+            std::memcpy(&f, &bits, 4);
+            return f;
+        }
+        double d;
+        std::memcpy(&d, &raw, 8);
+        return d;
+    }
+    return static_cast<double>(raw);
+}
+
+u64 ScanRaw(const json& value, const MemoryScan& scan) {
+    if (scan.is_float) {
+        if (scan.size == 4) {
+            const float f = value.get<float>();
+            u32 bits;
+            std::memcpy(&bits, &f, 4);
+            return bits;
+        }
+        const double d = value.get<double>();
+        u64 bits;
+        std::memcpy(&bits, &d, 8);
+        return bits;
+    }
+    const u64 mask = scan.size == 8 ? ~u64{0} : (u64{1} << (scan.size * 8)) - 1;
+    return value.get<u64>() & mask;
+}
+
+json ScanMemory(ToolState& state, const json& params) {
+    Kernel::KProcess& process = Application(state);
+    Memory::Memory& memory = process.GetMemory();
+    MemoryScan& scan = CurrentScan();
+    const std::string action = params.value("action", std::string{"next"});
+    const auto begin = std::chrono::steady_clock::now();
+    if (action == "start") {
+        scan = MemoryScan{};
+        scan.size = params.value("size", 4U);
+        scan.is_float = params.value("type", std::string{"int"}) == "float";
+        if ((scan.size != 1 && scan.size != 2 && scan.size != 4 && scan.size != 8) ||
+            (scan.is_float && scan.size != 4 && scan.size != 8)) {
+            throw std::runtime_error{"size must be 1, 2, 4 or 8 (float: 4 or 8)"};
+        }
+        const u64 want = ScanRaw(params.at("value"), scan);
+        const u64 heap = GetInteger(process.GetPageTable().GetHeapRegionStart());
+        const u64 heap_end = heap + process.GetPageTable().GetHeapRegionSize();
+        constexpr u64 Page = 0x1000;
+        for (u64 page = heap; page < heap_end; page += Page) {
+            const u8* const base = GuestByte(memory, page);
+            if (base == nullptr) {
+                continue;
+            }
+            for (u64 offset = 0; offset < Page; offset += scan.size) {
+                if (ReadScanValue(base + offset, scan.size) == want) {
+                    scan.addresses.push_back(page + offset);
+                    scan.values.push_back(want);
+                }
+            }
+            if (scan.addresses.size() > 50'000'000) {
+                throw std::runtime_error{"over 50 million matches: start from a rarer value"};
+            }
+        }
+    } else if (action == "next") {
+        if (scan.addresses.empty()) {
+            throw std::runtime_error{"no scan: call with action start first"};
+        }
+        const std::string mode = params.value("mode", std::string{"eq"});
+        const bool has_value = params.contains("value");
+        const u64 want = has_value ? ScanRaw(params.at("value"), scan) : 0;
+        size_t kept = 0;
+        for (size_t i = 0; i < scan.addresses.size(); ++i) {
+            const u8* const pointer = GuestByte(memory, scan.addresses[i]);
+            if (pointer == nullptr) {
+                continue;
+            }
+            const u64 now = ReadScanValue(pointer, scan.size);
+            const double a = ScanNumber(scan.values[i], scan);
+            const double b = ScanNumber(now, scan);
+            bool keep = false;
+            if (mode == "eq") {
+                keep = has_value && now == want;
+            } else if (mode == "changed") {
+                keep = now != scan.values[i];
+            } else if (mode == "unchanged") {
+                keep = now == scan.values[i];
+            } else if (mode == "decreased") {
+                keep = b < a;
+            } else if (mode == "increased") {
+                keep = b > a;
+            } else {
+                throw std::runtime_error{"mode: eq, changed, unchanged, decreased or increased"};
+            }
+            if (keep) {
+                scan.addresses[kept] = scan.addresses[i];
+                scan.values[kept] = now;
+                ++kept;
+            }
+        }
+        scan.addresses.resize(kept);
+        scan.values.resize(kept);
+    } else if (action != "list") {
+        throw std::runtime_error{"action: start, next or list"};
+    }
+    const size_t show = Param<size_t>(params, "show", 32, 0, 1024);
+    json hits = json::array();
+    for (size_t i = 0; i < scan.addresses.size() && i < show; ++i) {
+        hits.push_back({{"address", HexAddress(scan.addresses[i])},
+                        {"value", ScanNumber(scan.values[i], scan)}});
+    }
+    return {{"count", scan.addresses.size()},
+            {"size", scan.size},
+            {"type", scan.is_float ? "float" : "int"},
+            {"hits", std::move(hits)},
+            {"elapsed_ms", std::chrono::duration<double, std::milli>(
+                               std::chrono::steady_clock::now() - begin)
+                               .count()}};
+}
+
 json ReadGpuMemory(ToolState& state, const json& params) {
     if (!IsVulkan()) {
         throw std::runtime_error{"GPU memory reads need the Vulkan renderer"};
@@ -963,6 +1106,7 @@ Handlers MakeHandlers(const std::shared_ptr<ToolState>& state) {
         {"read_memory", handler(ReadMemory)},
         {"write_memory", handler(WriteMemory)},
         {"search_memory", handler(SearchMemory)},
+        {"scan_memory", handler(ScanMemory)},
         {"read_gpu_memory", handler(ReadGpuMemory)},
         {"input", waiting(Input)},
         {"input_sequence", waiting(InputSequence)},

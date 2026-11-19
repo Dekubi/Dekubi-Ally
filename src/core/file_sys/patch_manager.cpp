@@ -231,6 +231,64 @@ constexpr std::array TEXTURE_POOL_RECORDS{
                        .original = 0},
 };
 
+// Dekubi's mod menu hooks. The flags live at the end of main's BSS (main+0x4E9FF00, one byte each:
+// +0 invincibility); the menu writes them while the game runs, so nothing here changes the game
+// until one is set. Invincibility takes over `add w9, w10, w9` in the Life component's step
+// (main+0x49dcb0, w9 = this frame's damage sum, as daurosk/oot-remake-multiplayer's LIFE_STEP hook
+// found) and zeroes a positive sum when the component's actor ([x19+0x18]) is named "Play..."
+// (Player_Child, Player_Adult). Enemies still take damage; healing still applies.
+constexpr size_t MOD_MENU_STATE_OFFSET = 0x4E9FF00;
+constexpr size_t MOD_MENU_STATE_SIZE = 0x20;
+constexpr size_t MOD_MENU_ROUTINE_OFFSET = 0x3C46F20;
+constexpr std::array<u32, 18> MOD_MENU_ROUTINE{
+    0xA9BF47F0, // stp x16, x17, [sp, #-16]!
+    0x0B090149, // add w9, w10, w9
+    0x37F801C9, // tbnz w9, #31, done (healing)
+    0xB00092D0, // adrp x16, 0x4e9f000
+    0x397C0210, // ldrb w16, [x16, #0xf00] (invincibility flag)
+    0x34000170, // cbz w16, done
+    0xF9400E70, // ldr x16, [x19, #0x18] (actor)
+    0xB4000130, // cbz x16, done
+    0xF9413210, // ldr x16, [x16, #0x260] (actor name)
+    0xB40000F0, // cbz x16, done
+    0xB9400210, // ldr w16, [x16]
+    0x528D8A11, // mov w17, #0x6c50
+    0x72AF2C31, // movk w17, #0x7961, lsl #16 ("Play")
+    0x4A110210, // eor w16, w16, w17
+    0x35000050, // cbnz w16, done
+    0x2A1F03E9, // mov w9, wzr
+    0xA8C147F0, // done: ldp x16, x17, [sp], #16
+    0x17215B54, // b 0x49dcb4
+};
+static_assert(TEXTURE_POOL_ROUTINE_OFFSET + TEXTURE_POOL_ROUTINE.size() <= MOD_MENU_ROUTINE_OFFSET &&
+              MOD_MENU_ROUTINE_OFFSET + MOD_MENU_ROUTINE.size() * 4 <= 0x3C47000);
+constexpr std::array<u8, 4> MOD_MENU_LIFE_HOOK{0x9C, 0xA4, 0xDE, 0x14}; // b 0x3c46f20
+constexpr auto MakeModMenuRoutineBytes() {
+    std::array<u8, MOD_MENU_ROUTINE.size() * 4> bytes{};
+    for (size_t i = 0; i < MOD_MENU_ROUTINE.size(); ++i) {
+        for (size_t b = 0; b < 4; ++b) {
+            bytes[i * 4 + b] = static_cast<u8>(MOD_MENU_ROUTINE[i] >> (b * 8));
+        }
+    }
+    return bytes;
+}
+constexpr auto MOD_MENU_ROUTINE_BYTES = MakeModMenuRoutineBytes();
+constexpr auto MakeModMenuRecords() {
+    std::array<BuiltinPatchRecord, MOD_MENU_ROUTINE.size() + 1> records{};
+    records[0] = {.module_offset = 0x49DCB0,
+                  .bytes = MOD_MENU_LIFE_HOOK,
+                  .checked = true,
+                  .original = 0x0B090149}; // add w9, w10, w9
+    for (size_t i = 0; i < MOD_MENU_ROUTINE.size(); ++i) {
+        records[i + 1] = {.module_offset = MOD_MENU_ROUTINE_OFFSET + i * 4,
+                          .bytes = std::span<const u8>{MOD_MENU_ROUTINE_BYTES}.subspan(i * 4, 4),
+                          .checked = true,
+                          .original = 0};
+    }
+    return records;
+}
+constexpr auto MOD_MENU_RECORDS = MakeModMenuRecords();
+
 // The call (to our routine or to Dark's), Dark's routine (so the mode can switch live), the water
 // hook (over its fcvtzs), then our cave one word at a time, each checked to be zero in the module.
 // Since v5.8 (zortos293/Lichii#1180's finding, 2026-11-10) Dark's mode gets the same hook and
@@ -329,6 +387,16 @@ constexpr std::array BUILTIN_PATCHES{
         .build_id = "E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348",
         .records = TEXTURE_POOL_RECORDS,
         .disable_env = "EDEN_NX2_NO_TEXTURE_POOL_X2",
+    },
+    BuiltinPatch{
+        .name = "Mod Menu (built-in)",
+        .title_id = 0x0400486024DEC000,
+        .module = "main",
+        .build_id = "E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348",
+        .records = MOD_MENU_RECORDS,
+        .disable_env = "EDEN_NX2_NO_MOD_MENU",
+        .state_offset = MOD_MENU_STATE_OFFSET,
+        .state_size = MOD_MENU_STATE_SIZE,
     },
     // Before Dark's: it contains his routine and replaces it while applied. Off by default; only
     // listed in Add-Ons while the setting is on.

@@ -174,15 +174,15 @@ void Fsr3FrameGen::CreateResources(const Device& device) {
     m_motion_image = CreateWrappedImage(m_allocator, m_flow_extent, VK_FORMAT_R16G16_SFLOAT);
     m_motion_view = CreateWrappedImageView(device, m_motion_image, VK_FORMAT_R16G16_SFLOAT);
 
-    // Descriptor pool ΓÇö sized for flow (3 bindings) + interp (4 bindings) ├ù 2 sets
+    // Descriptor pool — sized for flow (3 bindings) + interp (4 bindings) × MAX_TARGETS
     const std::array pool_sizes{
-        VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 12},
-        VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 6},
+        VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 32},
+        VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 16},
     };
     m_desc_pool = device.GetLogical().CreateDescriptorPool(VkDescriptorPoolCreateInfo{
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
         .flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT,
-        .maxSets = 4,
+        .maxSets = static_cast<u32>(1 + MAX_TARGETS),
         .poolSizeCount = static_cast<u32>(pool_sizes.size()),
         .pPoolSizes = pool_sizes.data(),
     });
@@ -273,11 +273,35 @@ void Fsr3FrameGen::CreatePipelines(const Device& device) {
 
     // Allocate descriptor sets
     m_flow_desc_sets = CreateWrappedDescriptorSets(m_desc_pool, {*m_flow_desc_layout});
-    m_interp_desc_sets = CreateWrappedDescriptorSets(m_desc_pool, {*m_interp_desc_layout});
+    const std::vector<VkDescriptorSetLayout> interp_layouts(MAX_TARGETS, *m_interp_desc_layout);
+    m_interp_desc_sets = CreateWrappedDescriptorSets(m_desc_pool, interp_layouts);
+
+    // Static binding for optical flow: *m_current_view, *m_history_view, *m_motion_view
+    std::vector<VkDescriptorImageInfo> image_infos;
+    image_infos.reserve(4);
+    std::vector<VkWriteDescriptorSet> flow_updates{
+        CreateWriteDescriptorSet(image_infos, *m_linear_sampler, *m_current_view, m_flow_desc_sets[0], 0),
+        CreateWriteDescriptorSet(image_infos, *m_linear_sampler, *m_history_view, m_flow_desc_sets[0], 1),
+    };
+    const VkDescriptorImageInfo motion_store_info{
+        .imageView = *m_motion_view,
+        .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+    };
+    flow_updates.push_back(VkWriteDescriptorSet{
+        .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+        .dstSet = m_flow_desc_sets[0],
+        .dstBinding = 2,
+        .descriptorCount = 1,
+        .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+        .pImageInfo = &motion_store_info,
+    });
+    device.GetLogical().UpdateDescriptorSets(flow_updates, {});
+
+    m_cached_interp_dest_views.fill(VK_NULL_HANDLE);
 }
 
 void Fsr3FrameGen::Process(const Device& device, Scheduler& scheduler, VkImage current_frame,
-                           VkImageView current_view, u64 frame_count) {
+                           u64 frame_count) {
     if (!m_has_history) {
         // First frame: populate history and current-frame copy via batched dual-copy
         scheduler.Record([this, current_frame](vk::CommandBuffer cmdbuf) {
@@ -288,36 +312,11 @@ void Fsr3FrameGen::Process(const Device& device, Scheduler& scheduler, VkImage c
         return;
     }
 
-    // ΓöÇΓöÇ Duplicate-frame detection ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+    // ── Duplicate-frame detection ─────────────────────────────────────────────
     if (frame_count == m_last_frame_count && m_flow_valid) {
         return;
     }
     m_last_frame_count = frame_count;
-
-    // ΓöÇΓöÇ Descriptor caching ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
-    if (current_view != m_cached_flow_current_view) {
-        std::vector<VkDescriptorImageInfo> image_infos;
-        image_infos.reserve(4);
-        std::vector<VkWriteDescriptorSet> updates{
-            CreateWriteDescriptorSet(image_infos, *m_linear_sampler, current_view, m_flow_desc_sets[0], 0),
-            CreateWriteDescriptorSet(image_infos, *m_linear_sampler, *m_history_view, m_flow_desc_sets[0], 1),
-        };
-
-        const VkDescriptorImageInfo motion_store_info{
-            .imageView = *m_motion_view,
-            .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-        };
-        updates.push_back(VkWriteDescriptorSet{
-            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-            .dstSet = m_flow_desc_sets[0],
-            .dstBinding = 2,
-            .descriptorCount = 1,
-            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-            .pImageInfo = &motion_store_info,
-        });
-        device.GetLogical().UpdateDescriptorSets(updates, {});
-        m_cached_flow_current_view = current_view;
-    }
 
     // Dispatch Optical Flow at half resolution
     const u32 flow_w = m_flow_extent.width;
@@ -354,21 +353,23 @@ void Fsr3FrameGen::Process(const Device& device, Scheduler& scheduler, VkImage c
     m_flow_valid = true;
 }
 
-void Fsr3FrameGen::Generate(const Device& device, Scheduler& scheduler,
+void Fsr3FrameGen::Generate(const Device& device, Scheduler& scheduler, u32 target_index,
                             VkImageView destination_storage_view, float blend_factor,
                             float flow_scale) {
     if (!m_has_history || !m_flow_valid) {
         return;
     }
 
-    // ΓöÇΓöÇ Descriptor caching for interpolation ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
-    if (destination_storage_view != m_cached_interp_dest_view) {
+    target_index = std::min<u32>(target_index, static_cast<u32>(MAX_TARGETS - 1));
+
+    // ── Descriptor caching for interpolation (independent set per in-flight target) ─
+    if (destination_storage_view != m_cached_interp_dest_views[target_index]) {
         std::vector<VkDescriptorImageInfo> image_infos;
         image_infos.reserve(4);
         std::vector<VkWriteDescriptorSet> updates{
-            CreateWriteDescriptorSet(image_infos, *m_linear_sampler, *m_current_view, m_interp_desc_sets[0], 0),
-            CreateWriteDescriptorSet(image_infos, *m_linear_sampler, *m_history_view, m_interp_desc_sets[0], 1),
-            CreateWriteDescriptorSet(image_infos, *m_linear_sampler, *m_motion_view, m_interp_desc_sets[0], 2),
+            CreateWriteDescriptorSet(image_infos, *m_linear_sampler, *m_current_view, m_interp_desc_sets[target_index], 0),
+            CreateWriteDescriptorSet(image_infos, *m_linear_sampler, *m_history_view, m_interp_desc_sets[target_index], 1),
+            CreateWriteDescriptorSet(image_infos, *m_linear_sampler, *m_motion_view, m_interp_desc_sets[target_index], 2),
         };
 
         const VkDescriptorImageInfo dest_info{
@@ -377,14 +378,14 @@ void Fsr3FrameGen::Generate(const Device& device, Scheduler& scheduler,
         };
         updates.push_back(VkWriteDescriptorSet{
             .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-            .dstSet = m_interp_desc_sets[0],
+            .dstSet = m_interp_desc_sets[target_index],
             .dstBinding = 3,
             .descriptorCount = 1,
             .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
             .pImageInfo = &dest_info,
         });
         device.GetLogical().UpdateDescriptorSets(updates, {});
-        m_cached_interp_dest_view = destination_storage_view;
+        m_cached_interp_dest_views[target_index] = destination_storage_view;
     }
 
     // Interpolation dispatches at full resolution
@@ -399,10 +400,10 @@ void Fsr3FrameGen::Generate(const Device& device, Scheduler& scheduler,
         .flow_scale = flow_scale,
     };
 
-    scheduler.Record([this, constants, out_w, out_h](vk::CommandBuffer cmdbuf) {
+    scheduler.Record([this, constants, out_w, out_h, target_index](vk::CommandBuffer cmdbuf) {
         cmdbuf.BindPipeline(VK_PIPELINE_BIND_POINT_COMPUTE, *m_interp_pipeline);
         cmdbuf.BindDescriptorSets(VK_PIPELINE_BIND_POINT_COMPUTE, *m_interp_pipe_layout, 0,
-                                  m_interp_desc_sets[0], {});
+                                  m_interp_desc_sets[target_index], {});
         cmdbuf.PushConstants(*m_interp_pipe_layout, VK_SHADER_STAGE_COMPUTE_BIT, constants);
         cmdbuf.Dispatch((out_w + 15) / 16, (out_h + 15) / 16, 1);
     });

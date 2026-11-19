@@ -60,6 +60,8 @@ add_library(
     event_wait.h
     fiber.cpp
     fiber.h
+    frame_budget.cpp
+    frame_budget.h
     fixed_point.h
     free_region_manager.h
     frizti_settings.cpp

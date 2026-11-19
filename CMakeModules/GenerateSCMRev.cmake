@@ -15,10 +15,11 @@ endfunction()
 get_timestamp(BUILD_DATE)
 
 # Dekubi (the Frizti fork, named Frizti v1..v3.5 before v4) releases are numbered v1, v2, v3.5, v4...:
-# dist/frizti_version.txt holds the number.
-set(FRIZTI_VERSION_FILE "${CMAKE_SOURCE_DIR}/dist/frizti_version.txt")
+# The root VERSION file holds the number (the CI scripts and release packages read it too), so the
+# title bar and the release files can't disagree.
+set(FRIZTI_VERSION_FILE "${CMAKE_SOURCE_DIR}/VERSION")
 if (EXISTS "${FRIZTI_VERSION_FILE}")
-    file(STRINGS "${FRIZTI_VERSION_FILE}" FRIZTI_VERSION LIMIT_COUNT 1 REGEX "^[0-9]+([.][0-9]+)?([.][0-9]+)?$")
+    file(STRINGS "${FRIZTI_VERSION_FILE}" FRIZTI_VERSION LIMIT_COUNT 1 REGEX "^[0-9]+([.][0-9]+)?([.][0-9]+)?( [a-zA-Z0-9]+|-.*)?$")
     set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${FRIZTI_VERSION_FILE}")
     # The log names the commit: reconfigure when HEAD moves (commit, checkout, merge, revert).
     if (EXISTS "${CMAKE_SOURCE_DIR}/.git/logs/HEAD")

@@ -1,132 +1,95 @@
-<!--
-Fritchii's "What's new" notes for this build: paste the release notes (the GitHub release body,
-e.g. E:\OotRemakeEmulation\release\fritchii-vX\notes.md) here before the release build. The
-download instructions at the top are dropped in the app. While this file holds only this comment,
-no "What's new" window pops up after an update (Help > What's New says there are no notes yet).
--->
-## ⬇️ Download this file: **`Fritchii-v5.7-Windows-x64.zip`**
+# Dekubi Ally v1.1.6 beta
 
-On Fritchii v4 to v5.6 you don't need to download anything: it offers this update when you open it. Otherwise unzip it anywhere and run `Fritchii-v5.7\lichii.exe`. Don't download "Source code (zip)" or "Source code (tar.gz)": they contain no emulator.
+### 🎯 Affected Games & Who Benefits
+- **The Legend of Zelda: Ocarina of Time (`0400486024DEC000`):**
+  - **Zora River Freeze Fixed:** Completely removes the 6.3-second freeze when entering Zora River and cold compute zones.
+  - **Interactive Element Hitches Fixed:** Eliminates up to 1-second freezes when objects like the Deku Tree eye, ladders, torches, and player shields first render.
+  - **Split Semaphore Stalls Removed:** Cuts over 3 seconds of cumulative GPU split drain hitches per play session.
+  - **Dynamic FPS & High Refresh:** Full compatibility with the 60+ FPS dynamic refresh pipeline without audio or speed desyncs.
+  - **Universal Temporal Upscaling:** Seamlessly choose between **AMD FSR 4 / Redstone**, **Intel XeSS**, and **NVIDIA DLSS** (or native rendering).
+- **Switch 2 & Modern Mesh Titles:**
+  - Games utilizing native mesh shaders and bounded compute dispatch cycles run with seamless pipeline deduplication.
+- **All Games on Memory-Constrained Hardware (ROG Ally & 4 GB VRAM / 8 GB RAM PCs):**
+  - Reduces host commit footprint by ~5.5 GiB and reclaims idle physical RAM, preventing out-of-memory crashes and severe paging dips across your entire library.
 
 ---
 
-Fritchii v5.7.
+### ⚡ Complete Upscaling Trio: XeSS, FSR & DLSS (with DLSS 5 Support)
+- **Intel XeSS (AI Super Sampling & Neural Reconstruction):**
+  - Added native Intel XeSS Super Resolution and Anti-Aliasing support (`libxess.dll` in `user/xess/`).
+  - Brings AI tensor reconstruction and jittered camera anti-aliasing to ROG Ally, Intel Arc, AMD Radeon, and NVIDIA GeForce cards.
+  - Dedicated configuration panel with folder shortcut and direct link to Intel's official repository.
+- **AMD FSR 4 / Redstone (FidelityFX SDK 2.4.0 ML):**
+  - Integrated AMD FidelityFX SDK 2.4.0 (Redstone branch) featuring machine-learning upscaling for RDNA 2, RDNA 3 / 3.5 (ROG Ally Radeon 780M), and RDNA 4 GPUs.
+  - Includes built-in one-click download, Authenticode signature verification, and automated FSR 3.1 fallback.
+- **NVIDIA DLSS & Model Version Selector (with DLSS 5 & Streamline Releases):**
+  - References and integrates official [NVIDIA Streamline releases](https://github.com/NVIDIA-RTX/Streamline/releases) (`v2.14.16`) for DLSS Super Resolution and DLSS Frame Generation (`sl.interposer.dll`, `sl.dlss.dll`, `sl.dlss_g.dll`, `nvngx_dlssg.dll`).
+  - Dynamic **DLSS Version** selector under **Emulation > Configure > Graphics > NVIDIA DLSS**.
+  - Integrated support for the **DLSS 5** neural model architecture based on [Merserk/dlss5-visual-enhancer](https://github.com/Merserk/dlss5-visual-enhancer), selectable alongside **DLSS 4 (Preset K)**, **DLSS 3.10**, and **Auto (NVIDIA App OTA)** with Authenticode verification.
 
-#### New
-- **.nx games** (fab918's NXFormat). Fritchii opens `.nx` archives like any other game, with their updates and DLC. To make one, right-click a game in the list and pick **Convert to NX...** (from NUP, NSP, XCI or a dump folder; NSP and XCI updates and DLC in the same folder go in too). **Manage NX Archive** adds or removes updates and DLC later. Everything runs inside Fritchii, no extra files needed (zortos293/Lichii#923, #1078 and #1232 by fab918).
+---
 
-#### Fixed
-- **Stretched or glowing geometry and white areas after area changes** should be gone. When the game freed some GPU memory and reused the same address later, the emulator kept showing the GPU the old memory, which by then held other data, so a mesh could read a pack of game files as its vertices until a restart (zortos293/Lichii#1199 and follow-ups by PantACRO4life, 99ivs and zortos293). If you still see one, use Help > Export Log and post it in the Issues channel.
-- **Ctrl+U (high refresh) works with the Hyrule Cheat Menu mod installed.** Fritchii's patch moved to a spot the mod doesn't use, and the mod's code stays untouched.
-- **Kakariko graveyard:** two objects the game draws were skipped (zortos293/Lichii#279, #1186 and #1181).
-- **No more out-of-memory crash on PCs with 16 GB of RAM:** the texture cache now also stays within what Windows can hand out, not just what the GPU has (zortos293/Lichii#1210).
+### 🚀 Multi-Vendor Frame Generation & Multipliers (2x, 3x, 4x)
+- **Multi-Vendor Frame Generation Backends:**
+  - **AMD FSR 3.1 / Redstone Frame Generation:** Built-in high-performance compute optical-flow bilateral frame synthesis, running universally across all GPU vendors without proprietary hardware locks.
+  - **NVIDIA DLSS 3 Frame Generation (DLSS-G):** Streamline-driven DLSS-G (`nvngx_dlssg.dll`) with optical flow acceleration.
+  - **Intel XeSS Frame Generation (XeSS-FG):** Intel's cutting-edge frame generator (`libxess_fg.dll` in `user/xess/`).
+  - **Lossless Scaling (LSFG):** Seamless frame generation for low-overhead interpolation.
+- **Frame Generation Multipliers (`2x`, `3x`, `4x`):**
+  - Fully exposed frame multiplier controls:
+    - **2x:** Generates 1 intermediate frame per rendered frame (e.g., 30 -> 60 FPS, 60 -> 120 FPS).
+    - **3x:** Generates 2 intermediate frames per rendered frame (e.g., 30 -> 90 FPS).
+    - **4x:** Generates 3 intermediate frames per rendered frame (e.g., 30 -> 120 FPS, 60 -> 240 FPS).
+  - Configurable in **Emulation > Configure > Graphics** and accessible instantly on-the-fly via the **Dekubi Quick Overlay Menu**!
 
-#### Faster and smoother
-- **About 5 fps more in fights** (51.9 to 56.9 in a Stalchild fight on an RTX 4080): when the game reads back something the GPU made, the emulator's GPU thread no longer stops and waits for the graphics card (the core of zortos293/Lichii#1028).
-- **Less stutter right after area changes.** OoT runs on 6 emulated CPU cores and each compiled the same game code for itself after a load; idle cores now do it ahead of time.
-- **Less VRAM and more free RAM:** the texture cache cleans up from about 7.5 GB at most, so VRAM stays around 6 GB on big cards instead of climbing to 10 GB. Windows counts that memory against your RAM too, so area loads stop stuttering when the PC runs low. Cards with less VRAM keep their own lower limit.
-- **Shorter hitches on loads and kills:** game file reads are no longer slowed to 40 MB/s, and the background memory cleanup waits while the game is loading.
-- **Help > Export Log now says what caused each stutter**, so stutter reports are much easier to track down.
-- Fritchii's tuned settings are applied once more with this update; you can change anything afterwards.
+---
 
-### In v5.6
+### 📊 Performance Overlay with Frame Times (Dekubi Green)
+- **Real-Time GPU Submission Timestamps:** Live Vulkan GPU render execution time in milliseconds (`GPU ms`) and utilization (`% busy`) calculated via GPU queue timestamp pairs.
+- **Process CPU & Bottleneck Identification:** Shows Dekubi's CPU utilization (`CPU %`) alongside an automated real-time bottleneck detector (`Limited by GPU`, `Front`, `Back`, `Render`, `Game`, or `Sync`; or `Capped` when hitting the target cap), lighting up in **Dekubi Green (`#2ecc40`)**.
+- **Per-Thread Execution Breakdown:** Dedicated millisecond execution monitors for `Front` (command buffer submission), `Back` (worker translation), `Game` (CPU core), and `Render` (presentation).
+- **Multi-Vendor FG Badging:** Displays active frame generator badges (`FSR 3.1`, `LSFG`, `DLSS-G`, `XeSS-FG`) and active multiplier directly beside the FPS readout.
+- **View Menu Integration:** Easily toggle rows on/off via **View > Show Overlay Frame Times**.
 
-#### Fixed
-- **The huge glowing triangles ("light beams") are much rarer.** In Kokiri Forest, Kakariko, the graveyard and Hyrule Field they used to grow over a session. One cause is fixed: a compute shader wrote further than the emulator tracked, and the game read old data back from there. Every compute shader is now checked once, and tracked fully if it writes further. No fps cost. They can still show up in long sessions: if you see one, use Help > Export Log and post it in the Issues channel.
-- **AMD: no more GPU hangs on draws the game makes with mesh shaders** (zortos293/Lichii#814). AMD's driver now goes through a compute fallback for them. New **Mesh Shaders** setting in Graphics (Automatic, Native, Compute) if you want to try the other path.
-- **AMD: no more rainbow "disco" outline** where mountains and far scenery meet the sky. Draws that don't output every colour channel left the rest undefined, and AMD's driver filled it with garbage. Port of jpkto's Lichii #353 (Fritchii #29 by trushna88).
-- **The opening cutscenes and the main menu video stay in sync with their audio.** The game only shows about 30 frames a second on those screens, so the 60 fps videos played at half speed while the music kept going (almost 7 seconds behind after 12 seconds). Videos now show the frame that matches the audio and skip the rest. A broken video frame or a failing decoder can no longer crash the game.
-- **The Song of Time no longer ends with a loud crackle** (zortos293/Lichii#1073 by justin-wq1337).
-- **No more freezes of up to 3 seconds** when the game swaps a compute shader mid-play (zortos293/Lichii#969 by El-Sashok).
-- **Unlocking the speed limit no longer makes OoT run fast.** Above 60 fps the whole game sped up; it now stays at its normal speed. Turbo and Slow still work as fast-forward and slow motion. In OoT, Ctrl+U now switches the high refresh rate mode instead (see New).
-- **Opening the ocarina without a microphone no longer crashes the game** (zortos293/Lichii#497 and #881, via Fritchii #16).
-- Mods that patch the same spot as Fritchii's built-in patches win over them (Fritchii #5). Game titles from NUP files show properly (Fritchii #20). Empty controller mapping values are no longer lost (Fritchii #30 by FFcustoms). Fritchii builds on Linux again (Fritchii #19).
-- **Help > Export Log always sends this session's log.** A Fritchii that never finished closing (for example after an update) could keep the log file locked, and the export then sent an old log.
+---
 
-#### New
-- **High refresh rate (experimental): press Ctrl+U in OoT to go above 60 fps** at normal game speed, and again to go back, no restart needed. The cap is in Graphics > Advanced (your monitor's refresh rate, 90, 120, 144 or 165), and the Graphics checkbox follows Ctrl+U. Water ripples keep moving above 60 too (zortos293/Lichii#1152, after #655 by atk3001). It's new: tell us if a timer, cutscene or minigame acts weird with it on. The 30 FPS mode still wins over it.
-- **Dark's standalone Dynamic FPS mod is skipped and hidden automatically**, since Fritchii has it built in (the mod also blocked the high refresh mode). Your files aren't touched. If you turned the built-in off in Add-Ons to use the mod, nothing changes for you.
-- **Reset to Defaults** (Settings > General) puts every setting back to Fritchii's own tuned settings, after saving a backup. **Restore Settings** brings any saved set back. Controls and game folders stay.
-- **"My settings don't apply" explained:** when OoT has its own values in Configure Game, the Settings window now says so at the top, with one button to put OoT back on your global settings. Export Log lists them too.
-- **RAM and VRAM in the performance overlay**, with how much your PC has left (amber when it's getting low).
-- **"Shaders build again in game" reports explain themselves:** the log now shows how big the GPU driver's own shader cache is at boot, after preparing and at exit, whether the last session closed cleanly, and how fast preparing ran.
-- **OoT's videos look like they should again on NVIDIA RTX.** The title screen and cutscene videos go through the game's own upscaler again (it removes banding and sharpens), instead of the plain stretch every build has used since v5. It costs nothing visible on RTX cards. GPUs that would have to emulate its math keep the fast stretch. Graphics > "Ocarina of Time movies" lets you pick either.
-- **Discord and Donate buttons** on the home screen and in the Help menu.
+### 🛡️ Single-Instance Protection & Process Safety
+- **Single-Instance Guard:** Prevents launching duplicate emulator processes when opening games, ROM shortcuts, or clicking desktop shortcuts while Dekubi is already active.
+- **Automatic Window Focus:** When a duplicate instance is triggered, Dekubi automatically locates the active window, restores it if minimized, brings it to the foreground with focus, and cleanly terminates the secondary process without interrupting your active game.
+- **Resource Collision Prevention:** Protects against dual-process RAM/VRAM exhaustion (vital on 16 GB unified memory devices like the ROG Ally / Ally X), audio backend lockouts, and Vulkan presentation swapchain collisions.
 
-#### Faster and lighter
-- **About 1 GB less RAM:** memory the game cleared to zero is given back to Windows.
-- **PCs with less than 24 GB of RAM** keep fewer old GPU pipelines around, so long sessions page less.
-- **About 5 fps more in Castle Town** (45 to 50 on an RTX 4080 standing in the market): the emulator stopped sending the GPU thousands of empty submissions a second, and reports and fences no longer allocate memory each time (part of zortos293/Lichii#1161).
-- **No more VRAM pile-up:** old render targets the game replaced are cleaned out, so VRAM stays around 5.5 GB in Castle Town instead of filling to 10-11 GB, and the freezes when it got full are gone (fights especially).
-- **Long sessions:** pipelines rebuilt after being cleaned out keep their buffers, so a long session can't slowly break some meshes (zortos293/Lichii#1143).
-- **Fewer dips in busy spots:** a depth buffer that the game clears right away is no longer copied in from game memory first (7.5 MB every frame in Castle Town, the cause of an NVIDIA player's dips). About +2.5 fps in Castle Town.
-- **Texture memory on 10 GB and bigger cards** can fill further before the cleanup starts (zortos293/Lichii#1129 by Liomar Oliveira).
-- **FXAA is off by default.** OoT's own anti-aliasing (or DLSS) already smooths edges, FXAA on top only blurred the picture. Fritchii's tuned settings are applied once more with this update; you can change anything afterwards.
+---
 
-### In v5.5
+### 🎨 UI & Settings Enhancements
+- **Window Filter "Auto" Mode (Default):** Dynamically toggles between **Area** downsampling (when picture resolution exceeds window/screen dimensions by >5%, eliminating moiré and shimmering artifacts on 1080p handheld screens) and **ScaleForce** (for smaller images). Includes dynamic pros/cons and screen-matching advice directly inside Graphics Configuration.
+- **Curated 360p–8K Resolution List:** Clean resolution dropdown displaying a single clean resolution label when docked and handheld match, filtered to standard resolutions from 360p up to 8K.
+- **Tools > Switches Live Editor (`Tools > Switches...`):** Dedicated GUI window to inspect, edit, and categorize active switches (`nx2_switches.txt`) by source (User file, Environment, Built-in) with live syntax highlighting and one-click Save & Restart.
+- **Framerate Cap Warning:** High refresh rate options now include an explicit warning: `Unlimited (can crash with VSync off)`.
+- **Full Per-Game Settings Retained:** All per-game overrides, `custom/<title_id>.ini` configs, and individual "Use global" checkboxes remain completely intact.
 
-- **No more flickering camera for players who had frame generation on before v5.** Fritchii has no frame generation, but an old setting kept it running in the background (and turned off Fritchii's frame pacing). It can't run anymore.
-- **Extended Dynamic State is set back to EDS2 once.** Players who set it to Disabled or EDS3 (often an old AMD crash tip) had "Preparing shaders" skip almost every shader. EDS2 is what the shaders are recorded with, and the AMD crash that tip avoided is fixed since v5.3. You can still change it afterwards.
-- **NVIDIA: the shader cache size is set by Fritchii itself.** Newer drivers no longer show "Shader Cache Size" in the NVIDIA Control Panel. Fritchii now tells the driver to keep a large cache for Fritchii only, nothing else on your PC changes.
-- **DLSS fixes:** the "Use NVIDIA DLSS" checkbox could be overridden by an old per-game value and show unchecked in game; it's a global setting now. New **DLSS preset** option (Default, J, K recommended, L, M) in Graphics.
-- Graphics > Extensions now says it: GPU thread pinning is built in and on automatically.
-- The old "Prepare Shaders" window says it's the optional quick warm-up (the full preparation runs by itself when you start the game).
+---
 
-### In v5.4
+### 🎮 Built-in Engine Patches & Game Mods Suite
+- **Engine-Level Built-in Patches:**
+  - **Dynamic FPS & High Refresh:** Dynamic tick rate scaling up to 120+ FPS.
+  - **Texture Pool x2:** Doubles texture allocator limits, preventing memory crashes in high-density areas.
+  - **Water Ripples above 60 FPS:** Preserves fluid ripple simulations at uncapped frame rates.
+  - **Occlusion Off & Poll Backoff:** Reduces CPU stalls in dense geometry scenes.
+  - **In-Game Mod Menu:** Quick-access toggle menu with hotkey controls.
+- **User Game Mods Pre-Packaged:**
+  - **The Legend of Zelda: BotW (`01007EF00011E000`):** 60 FPS mod, Dynamic Resolution Disable, and Improved Level of Detail (LOD).
+  - **Pokémon Scarlet (`0100A3D008C5C000`):** Scarlet 60 FPS (v1.0.1).
+  - **Pokémon Legends: Arceus (`0100F43008C44000`):** 60 FPS patch.
+  - **Zero-Overhead LayeredFS Support (`040074A01BF12000`):** Direct directory junction linking for instant loading without disk duplication.
+- **Precompiled Shader Recipes:**
+  - Pre-packaged shader cache recipes under `recipes/` (e.g., `OoT v131072 (cache v54).nx2recipe`).
 
-- **AMD: "Preparing shaders" now prepares the whole game.** Until now it skipped 116,373 of OoT's 120,461 shaders on AMD (it finished in seconds) because they were recorded on an NVIDIA card, which handles one GPU setting (the dynamic logic operation) differently. Fritchii now converts them for AMD's driver: all of them get prepared, so new areas play like you've been there before, as on NVIDIA. Thanks to koriko for the log that pinned it.
-- **AMD: expect a full "Preparing shaders" screen once** (around 15 minutes on an 8-core CPU), even if you went through it on v5.x. After that it's straight into the game.
-- Nothing changes on NVIDIA.
+---
 
-### In v5.3
-
-- **AMD: Shader libraries are really off by default now.** v5.2 meant to turn them off on AMD's Windows driver but its check never matched, so RX 5000/6000 cards kept crashing while loading shaders. If you unticked the setting yourself, nothing changes for you.
-- **Updates retry by themselves.** When GitHub's file server answers with an error like 504 or the connection drops, Fritchii now tries again a couple of times before giving up (from the next update on).
-
-### In v5.2
-
-- **GTX 10 series and older: invisible geometry is drawn again.** Objects the game draws with mesh shaders, which these cards lack, now go through a compute fallback (zortos's prototype, zortos293/Lichii#569, #642, #841). Some foliage or walls may still be missing or flicker.
-- **AMD: textures no longer write into other textures' memory.** Images whose size isn't a multiple of their block size wrote past their edge while being decoded. NVIDIA ignores that, AMD put it in other textures: black blocks, a crosshatch, and in the end a GPU crash. From CheezerWheezer's AMD fork.
-- **AMD (Windows driver): Shader libraries are off by default.** RX 5000 and 6000 cards crashed building them; unticking the setting was the workaround, now it's automatic. NVIDIA keeps them.
-- **The full right-click menu is back on the home screen** (Open Mod Data Location, Dump RomFS, Remove, Verify Integrity, Start Game without Custom Configuration...), for modders.
-- **No more crash when the PC's memory budget is reached** during long sessions (seen in Castle Town after half an hour). Buffers in system memory may now go over Windows' budget, like textures already could. Also from CheezerWheezer's AMD fork.
-
-### In v5.1
-
-- **Dialogue text no longer turns into scraps of other textures.** Each new text box size could show garbage the first time it appeared.
-- **Delete Shader Cache** in the Help menu (and when you right-click the game on the home screen), with a confirmation. Only for a cache that went bad: the shaders are prepared again on the next start.
-- **AMD: likely fix for a crash right after pressing Play** (seen on an RX 6600 with a shader cache from v4). v5's change for the red line in the Royal Family's Tomb is taken back for now, so that line can show again on AMD until it's redone and tested on AMD hardware.
-- One v5 change to how GPU memory is refreshed after small writes is taken back too: in this emulator it could bring back stale data.
-- **4K and scaled displays:** Fritchii follows the scale set in Windows, as far as your screen leaves room for its windows. 150% on a 4K screen used to become 200% (windows too big, dialogs cut off) and 125% became 100% (tiny text).
-- **Game Settings fits the screen:** long tabs scroll, the window resizes, and OK / Apply are always reachable.
-
-### Everything new in v5
-
-Windows x64. Tested with The Legend of Zelda: Ocarina of Time (0400486024DEC000) on a Ryzen 7 7800X3D + RTX 4080: stable 60 fps in a lot of places, rarely under 45 even in the heaviest ones (Water Temple included), no shader stutter after the preparation.
-
-#### New
-- **Shaders are prepared once, before you play.** The first time you start OoT, a "Preparing shaders" screen builds the game's shaders at full speed (about 15 minutes on an 8-core CPU, once). After that, places you visit for the first time play like you've been there before: walking into a new area used to freeze for ~0.7 s per new shader, now it's 40-70 ms, and loads are shorter. A new driver or GPU prepares them again. Built on zortos's precompile work (zortos293/Lichii#895, #896).
-- **New look.** Graphite theme, a home screen, an in-app "What's new", and Help > Export Log for bug reports.
-- **In-game controls.** Move the mouse to the top of the game for Pause, Restart, Stop, Fullscreen and the menus.
-- **New performance graph** (View > Performance Overlay): big fps, frame time, the lowest recent fps and a line against 60 (or 30). Loading screens leave a gap instead of a dip.
-
-#### Faster
-- **Moving NPCs and crowds no longer drag the frame rate down.** About +3 fps in Castle Town from each of the fixes behind it (render target relocation, image pool, an exact frame clock, cleanup of stale copies), and ~2.4 GB less video memory (8.8 to 6.4 GB in Castle Town).
-- **~2.3 GB less RAM**, so 16 GB PCs have more room.
-- **Windows 11: a precise game clock** built in. Players who got big gains from the GlobalTimerResolutionRequests registry tweak get it without the tweak.
-- Shader translation moved off the GPU thread.
-- Retrained profile-guided build on the new code.
-
-#### Fixed
-- **New players: "Press Start", chat bubbles and lighting** are right on an empty shader cache (they were missing or wrong while shaders were still building).
-- **Objects that could vanish for a whole session** in some games (clip distances, zortos293/Lichii#902).
-- **Fastmem kept on PCs with little free memory** instead of silently running 20-25% slower (zortos293/Lichii#645).
-- Less RAM while shaders are prepared (#878), a rare channel deadlock (#609), mods folders that don't exist (#686), Windows long paths (#576), and a few smaller ones (#918, #727, #610).
-
-#### Shader cache
-- The cache moves to version 54 (zortos's numbering), so caches from zortos's builds and Fritchii's are shared. The first start copies your old cache once (about +1.2 GB for OoT). The old `v52` file stays so you can roll back to v4; you can delete it later if you don't plan to.
-
-#### Known
-- AMD and Intel changes could not be tested on that hardware here: please report problems with your GPU model and the log (Help > Export Log).
-
-Dynamic FPS by Dark (built-in). Thanks to zortos293 and every Lichii contributor whose work is in here, and to the **Ocarina of Forks** Discord for the moral support, the novel ideas and the debugging help.
+### 🕹️ Device & Memory Optimizations (ROG Ally & 4 GB VRAM / 8 GB RAM PCs)
+- **8 GB PC Virtual Memory Guidance:** Checks available commit space at startup on 8 GB systems and suggests optimal pagefile sizing to prevent out-of-memory closures.
+- **Lazy Guest Memory Commit (`EDEN_NX2_SEC_RESERVE=1`):** Commits guest memory pages on demand on ROG Ally and entry-tier PCs, saving ~5.5 GiB of host commit charge.
+- **Idle Zero-Page Trimming (`EDEN_NX2_ZERO_TRIM=1`):** Periodically reclaims zero-filled guest memory pages during idle moments, freeing up 5.5–6.5 GiB physical RAM without micro-stutters.
+- **Pot Room & Shadow Depth VRAM Reclaim:** Relocates and auto-retires covered shadow depth targets after 4 frames in Castle Town guard house / pot room, cutting VRAM usage by ~3.2 GiB (10.5 GB -> 7.3 GB).
+- **Relocation Memory:** Persists render target relocation guards across sessions in `cache/relocation_lost.txt`.
+- **ROG Ally & 8-Core CPU Spin Optimization:** Tuned worker thread spin locks from 80 µs down to 20 µs to eliminate CPU core starvation on 8C/16T Zen 4 handhelds.

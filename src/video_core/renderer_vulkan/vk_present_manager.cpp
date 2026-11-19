@@ -594,10 +594,10 @@ void PresentManager::SetImageCount() {
     // FRAMES_IN_FLIGHT is 8, and the cache TICKS_TO_DESTROY is 8.
     // Mali drivers will give us 6.
 #ifdef HAS_LSFG
-    const size_t generations = Settings::FrameGenMaxGenerations();
+    constexpr size_t max_generations = LSFG_MAX_GENERATIONS;
     const size_t queued_composites = Settings::values.frame_gen_queue_target.GetValue() + 1;
     image_count =
-        std::clamp<size_t>((generations + 1) * queued_composites, swapchain.GetImageCount(),
+        std::clamp<size_t>((max_generations + 1) * queued_composites, swapchain.GetImageCount(),
                            MAX_FRAMES_IN_FLIGHT);
 #else
     image_count = std::min<size_t>(swapchain.GetImageCount(), MAX_FRAMES_IN_FLIGHT);

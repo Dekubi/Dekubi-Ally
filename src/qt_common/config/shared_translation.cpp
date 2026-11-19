@@ -242,8 +242,10 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
     INSERT(Settings, bg_blue, QString(), QString());
 
     INSERT(Settings, frame_gen, tr("Enable Frame Generation"), QString());
-    INSERT(Settings, frame_gen_type, tr("Frame Generation Type"), QString());
-    INSERT(Settings, frame_gen_multiplier, tr("Frame Generation Multiplier"), QString());
+    INSERT(Settings, frame_gen_type, tr("Frame Generation Backend"),
+           tr("Chooses the frame generation algorithm: AMD FSR 3.1 / Redstone, NVIDIA DLSS 3 (DLSS-G), Intel XeSS-FG, or Lossless Scaling (LSFG)."));
+    INSERT(Settings, frame_gen_multiplier, tr("Frame Generation Multiplier"),
+           tr("Number of frames displayed per rendered frame: 2x (1 generated frame), 3x (2 generated frames), or 4x (3 generated frames)."));
     INSERT(Settings, frame_gen_target_rate, tr("Target Frame Rate"), QString());
     INSERT(Settings, frame_gen_flow_scale_auto, tr("Auto Flow Scale"), QString());
     INSERT(Settings, frame_gen_flow_scale, tr("Flow Scale"), QString());
@@ -280,8 +282,12 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
               "8 MiB), the original behaviour: it can delay the game's own writes to nearby memory "
               "(flickering effects) and copy far more data back from the GPU.\n64 KiB cap marks at "
               "most 64 KiB, which can miss data a large dispatch really wrote."));
-    INSERT(Settings, use_asynchronous_shaders, tr("Enable asynchronous shader compilation"),
-           tr("May reduce shader stutter."));
+    INSERT(Settings, use_asynchronous_shaders,
+           tr("Don't wait for shaders that are still compiling"),
+           tr("On (default): a draw or compute pass whose shader is still compiling is skipped "
+              "for a few frames, so a new shader costs a brief pop-in instead of a freeze.\nOff "
+              "(accurate): the game waits for every shader, so nothing is ever missing, but each "
+              "new shader can freeze the game for up to a few seconds. Vulkan always skips."));
     INSERT(Settings, gpu_clock, tr("GPU Clocks"),
            tr("Makes the game believe GPU work finishes faster than it does, so it stops lowering "
               "resolution and render distance to fit the Switch's clocks."));
@@ -579,10 +585,13 @@ std::unique_ptr<ComboboxTranslationMap> ComboboxEnumeration(QObject* parent) {
     translations->insert({Settings::EnumMetadata<Settings::FrameGenType>::Index(),
                           {
                               PAIR(FrameGenType, Lsfg, tr("Lossless Scaling (LSFG)")),
-                              PAIR(FrameGenType, Fsr3, tr("Optical Flow Interpolation (built-in)")),
+                              PAIR(FrameGenType, Fsr3, tr("AMD FSR 3.1 / Redstone Frame Generation")),
+                              PAIR(FrameGenType, DlssG, tr("NVIDIA DLSS 3 Frame Generation (DLSS-G)")),
+                              PAIR(FrameGenType, XessFg, tr("Intel XeSS Frame Generation (XeSS-FG)")),
                           }});
     translations->insert({Settings::EnumMetadata<Settings::ScalingFilter>::Index(),
                           {
+                              PAIR(ScalingFilter, Auto, tr("Auto (recommended)")),
                               PAIR(ScalingFilter, NearestNeighbor, tr("Nearest Neighbor")),
                               PAIR(ScalingFilter, Bilinear, tr("Bilinear")),
                               PAIR(ScalingFilter, Bicubic, tr("Bicubic")),
@@ -599,6 +608,7 @@ std::unique_ptr<ComboboxTranslationMap> ComboboxEnumeration(QObject* parent) {
                               PAIR(ScalingFilter, Sgsr, tr("Snapdragon Game Super Resolution")),
                               PAIR(ScalingFilter, SgsrEdge, tr("Snapdragon Game Super Resolution EdgeDir")),
                               PAIR(ScalingFilter, Fsr3, tr("AMD FidelityFX Super Resolution 1, softer sharpening")),
+                              PAIR(ScalingFilter, Xess, tr("Intel XeSS (AI Super Sampling)")),
                           }});
     translations->insert({Settings::EnumMetadata<Settings::AntiAliasing>::Index(),
                           {
@@ -625,7 +635,8 @@ std::unique_ptr<ComboboxTranslationMap> ComboboxEnumeration(QObject* parent) {
                               PAIR(OotAntiAliasing, Game, tr("Game")),
                               PAIR(OotAntiAliasing, NoSharpening, tr("No sharpening")),
                               PAIR(OotAntiAliasing, Fsr3, tr("AMD FSR 3.1")),
-                              PAIR(OotAntiAliasing, Fsr4, tr("AMD FSR 4")),
+                              PAIR(OotAntiAliasing, Fsr4, tr("AMD FSR 4 / Redstone (FidelityFX SDK 2.4.0 ML)")),
+                              PAIR(OotAntiAliasing, Xess, tr("Intel XeSS (Neural Upscaling)")),
                           }});
     translations->insert({Settings::EnumMetadata<Settings::OotRefreshCap>::Index(),
                           {
@@ -634,6 +645,7 @@ std::unique_ptr<ComboboxTranslationMap> ComboboxEnumeration(QObject* parent) {
                               PAIR(OotRefreshCap, Hz120, tr("120 FPS")),
                               PAIR(OotRefreshCap, Hz144, tr("144 FPS")),
                               PAIR(OotRefreshCap, Hz165, tr("165 FPS")),
+                               PAIR(OotRefreshCap, Unlimited, tr("Unlimited (can crash with VSync off)")),
                           }});
     translations->insert({Settings::EnumMetadata<Settings::AspectRatio>::Index(),
                           {

@@ -133,6 +133,11 @@ public:
         write_tick = write_tick_;
     }
 
+    u64 last_synced_epoch = 0;
+    DAddr last_synced_addr = 0;
+    u32 last_synced_size = 0;
+    bool is_synchronized = false;
+
 private:
     VAddr cpu_addr = 0;
     BufferFlagBits flags{};

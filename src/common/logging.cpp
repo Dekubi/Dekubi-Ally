@@ -305,9 +305,14 @@ struct FileBackend final : public Backend {
 #endif
         bytes_written += file->WriteSpan(std::span<const char>{message.begin(), message.end()});
 
-        // Option to log each line rather than 4k buffers
-        if (Settings::values.log_flush_line.GetValue())
+        // Option to log each line rather than 4k buffers. Otherwise the file still gets what was
+        // logged up to a second ago: a frozen or killed process never writes its last buffer,
+        // and the log export then showed only a session's first seconds (ROG Ally, 2026-11-17).
+        const auto now = std::chrono::steady_clock::now();
+        if (Settings::values.log_flush_line.GetValue() || now - last_flush >= std::chrono::seconds{1}) {
             file->Flush();
+            last_flush = now;
+        }
 
         using namespace Common::Literals;
         // Prevent logs from exceeding a set maximum size in the event that log entries are spammed.
@@ -328,6 +333,7 @@ struct FileBackend final : public Backend {
 private:
     std::optional<FS::IOFile> file;
     std::size_t bytes_written = 0;
+    std::chrono::steady_clock::time_point last_flush{};
     bool enabled = true;
 };
 #endif

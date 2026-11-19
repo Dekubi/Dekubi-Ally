@@ -40,9 +40,13 @@ TEST_CASE("OoT anti-aliasing choice picks the upscaler; DLSS keeps its setting",
     CHECK(SelectOcarinaUpscaler(OotAntiAliasing::Fsr3, true, true, "") == Fsr);
     CHECK(SelectOcarinaUpscaler(OotAntiAliasing::Fsr4, true, true, "") == Fsr);
     CHECK(SelectOcarinaUpscaler(OotAntiAliasing::Fsr3, false, false, "") == Fsr);
+    // XeSS choice.
+    CHECK(SelectOcarinaUpscaler(OotAntiAliasing::Xess, true, true, "") == Xess);
+    CHECK(SelectOcarinaUpscaler(OotAntiAliasing::Xess, false, false, "") == Xess);
     // The environment override still decides.
     CHECK(SelectOcarinaUpscaler(OotAntiAliasing::Fsr3, false, false, "native") == Native);
     CHECK(SelectOcarinaUpscaler(OotAntiAliasing::Fsr4, false, true, "dlss") == Dlss);
+    CHECK(SelectOcarinaUpscaler(OotAntiAliasing::Xess, false, false, "fsr") == Fsr);
 }
 
 TEST_CASE("OoT FSR texture LOD bias follows the upscaler, the console mode and failure",
@@ -51,6 +55,7 @@ TEST_CASE("OoT FSR texture LOD bias follows the upscaler, the console mode and f
     using VideoCommon::KeepOcarinaFsrLodBias;
     using VideoCommon::OcarinaFsrLodBias;
     CHECK(OcarinaFsrLodBias(Fsr) == -1.58f);
+    CHECK(OcarinaFsrLodBias(Xess) == -0.58f);
     CHECK(OcarinaFsrLodBias(Dlss) == 0.0f);
     CHECK(OcarinaFsrLodBias(Native) == 0.0f);
     CHECK(KeepOcarinaFsrLodBias(true, false, false));

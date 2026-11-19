@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
 #include <cstdlib>
 #include <optional>
 #include <boost/algorithm/string/replace.hpp>
@@ -206,6 +207,25 @@ std::vector<Release> Release::ListFromJson(const std::string_view& json, const s
     return {};
 }
 
+const char* SystemCaBundle() {
+#ifdef __linux__
+    static const char* const bundle = []() -> const char* {
+        for (const char* path :
+             {"/etc/ssl/certs/ca-certificates.crt", "/etc/pki/tls/certs/ca-bundle.crt",
+              "/etc/ssl/ca-bundle.pem", "/etc/pki/tls/cacert.pem", "/etc/ssl/cert.pem"}) {
+            if (std::FILE* file = std::fopen(path, "rb")) {
+                std::fclose(file);
+                return path;
+            }
+        }
+        return nullptr;
+    }();
+    return bundle;
+#else
+    return nullptr;
+#endif
+}
+
 RequestResult Fetch(const std::string& url, const std::string& path) {
     try {
         constexpr std::size_t timeout_seconds = 15;
@@ -217,6 +237,10 @@ RequestResult Fetch(const std::string& url, const std::string& path) {
 
 #ifdef YUZU_BUNDLED_OPENSSL
         client->load_ca_cert_store(kCert, sizeof(kCert));
+#else
+        if (const char* bundle = SystemCaBundle()) {
+            client->set_ca_cert_path(bundle);
+        }
 #endif
 
         if (client == nullptr) {

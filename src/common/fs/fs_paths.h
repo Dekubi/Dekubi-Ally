@@ -34,13 +34,14 @@
 #define SHADER_DIR "shader"
 #define STREAMLINE_DIR "streamline"
 #define FIDELITYFX_DIR "fidelityfx"
+#define XESS_DIR "xess"
 #define TAS_DIR "tas"
 #define ICONS_DIR "icons"
 
 // Compatibility with other emulators
 #define CITRON_DIR "citron"
 #define SUDACHI_DIR "sudachi"
-#define YUZU_DIR "dekubi"
+#define YUZU_DIR "yuzu"
 #define SUYU_DIR "suyu"
 #define RYUJINX_DIR "Ryujinx"
 

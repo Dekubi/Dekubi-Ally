@@ -246,12 +246,19 @@ struct WordManager {
                  (pending_pointer - pending_offset) * BYTES_PER_PAGE);
         };
         CollectedRanges ranges;
+        // EDEN_NX2_EXP46=0: no early return for words with nothing to report or clear.
+        const bool skip_clean_words = VideoCore::Nx2Debug::Experiment(46) != 0;
         IterateWords(offset, size, [&](size_t index, u64 mask) {
             if (type == Type::GPU)
                 mask &= ~untracked_words[index];
             // Hot pages uploaded since the frame began are not modified again until the next frame.
             const u64 hot_clean = hot_pages ? hot_words[index] & hot_clean_words[index] & mask : 0;
             const u64 word = state_words[index] & mask & ~hot_clean;
+            if (skip_clean_words && word == 0 &&
+                (!clear || ((type != Type::CPU && type != Type::CachedCPU) ||
+                            (untracked_words[index] & mask) == 0))) {
+                return;
+            }
             if (clear) {
                 // Hot pages stay modified and untracked: their next use uploads them again,
                 // with no write protection to set and no write fault to take.

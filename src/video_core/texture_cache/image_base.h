@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <optional>
 #include <vector>
@@ -60,6 +61,12 @@ enum class ImageFlagBits : u32 {
     /// device memory when the guest memory under it can hold data (Image::BindTiles), and only
     /// the parts written are uploaded.
     SparseTiles = 1 << 23,
+    /// A render target its lookup created (Switch 2 titles); deleted early once it goes unused
+    /// while the cache is over its expected size (TextureCache::EvictDeadRenderTargets).
+    TransientTarget = 1 << 24,
+    /// Made over pages an early-deleted render target left; cleared at its first sampling, which
+    /// tells whether the game read those pages back (TextureCache::FillImageViews).
+    EvictBorn = 1 << 25,
 };
 DECLARE_ENUM_FLAG_OPERATORS(ImageFlagBits)
 
@@ -126,16 +133,25 @@ struct ImageBase {
     VAddr cpu_addr = 0;
     VAddr cpu_addr_end = 0;
 
+    /// Set through SetModificationTick.
     u64 modification_tick = 0;
     /// modification_tick of the latest GPU write that covered the whole image (a clear).
     u64 full_write_tick = 0;
     /// Last frame the image was prepared for use in (TextureCache::PrepareImage), 0 before.
     u64 last_use_frame = 0;
+    /// At least the newest modification_tick among aliased_images (raised when an alias's tick is
+    /// set or an alias is added): SynchronizeAliases has nothing to do while it is not newer.
+    u64 newest_alias_tick = 0;
+    /// Levels whose every layer a shader last wrote through a storage view. Any other GPU write
+    /// (render pass, clear, copy, alias copy) and an upload from guest memory clear them.
+    u32 storage_written_levels = 0;
     size_t lru_index = SIZE_MAX;
 
     /// Render target relocation guard (EXP43): the frame the GPU last wrote the image (~0 =
     /// never, or contents discarded), and the guard reasons this image already reported.
     u64 last_write_frame = ~u64{0};
+    /// Consecutive render frames with a write, up to last_write_frame (NextWriteStreak).
+    u32 write_streak = 0;
     u8 relocation_guard_noted = 0;
 
     /// Asynchronous shaders' skip rule (EDEN_NX2_ASYNC_DISCARD=2, ClassifyClearedTarget): the
@@ -187,6 +203,24 @@ struct ImageAllocBase {
 };
 
 bool AddImageAlias(ImageBase& lhs, ImageBase& rhs, ImageId lhs_id, ImageId rhs_id);
+
+/// Records a shader's storage write through `range`, given the levels written before it: a write
+/// over every layer adds its levels, a partial one keeps what the other layers held.
+void NoteStorageWrite(ImageBase& image, u32 levels_before, const SubresourceRange& range) noexcept;
+
+/// Whether every level `range` covers holds a shader's storage writes and nothing newer.
+[[nodiscard]] bool HoldsStorageWrites(const ImageBase& image,
+                                      const SubresourceRange& range) noexcept;
+
+/// Sets an image's modification tick and raises its aliases' newest_alias_tick to it.
+template <typename Images>
+void SetModificationTick(Images& images, ImageBase& image, u64 tick) {
+    image.modification_tick = tick;
+    for (const AliasedImage& alias : image.aliased_images) {
+        u64& newest = images[alias.id].newest_alias_tick;
+        newest = (std::max)(newest, tick);
+    }
+}
 
 } // namespace VideoCommon
 

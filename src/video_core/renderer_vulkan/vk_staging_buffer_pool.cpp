@@ -50,6 +50,11 @@ constexpr VkDeviceSize MAX_STREAM_BUFFER_SIZE = 128_MiB;
 constexpr VkDeviceSize STREAM_BUFFER_TAIL = 64_KiB;
 
 size_t GetStreamBufferSize(const Device& device) {
+    if (const auto tier = std::getenv("DEKUBI_DEVICE_TIER");
+        tier != nullptr && (std::strcmp(tier, "ally") == 0 || std::strcmp(tier, "deck") == 0 ||
+                            std::strcmp(tier, "low") == 0)) {
+        return 64_MiB;
+    }
     if (!device.HasDebuggingToolAttached()) {
         if (device.IsIntegrated()) {
             // An integrated GPU's device-local host-visible heap can be no bigger than the stream
@@ -246,25 +251,21 @@ StagingBufferRef StagingBufferPool::CreateStagingBuffer(size_t size, MemoryUsage
     if (device.IsBufferDeviceAddressSupported()) {
         buffer_ci.usage |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
     }
-    vk::Buffer buffer;
-    try {
-        buffer = memory_allocator.CreateBuffer(buffer_ci, usage);
-    } catch (const vk::Exception& e) {
-        // Out of memory: free every idle staging buffer and try once more.
-        size_t freed = 0;
-        for (StagingBuffersCache* cache : {&device_local_cache, &upload_cache, &download_cache}) {
-            for (StagingBuffers& level : *cache) {
-                const size_t before = level.entries.size();
-                std::erase_if(level.entries, [this](const StagingBuffer& entry) {
-                    return !entry.deferred && scheduler.IsFree(entry.tick);
-                });
-                freed += before - level.entries.size();
-                level.iterate_index = 0;
-                level.delete_index = 0;
-            }
-        }
-        LOG_WARNING(Render_Vulkan, "Staging buffer of {} MiB could not be made ({}); freed {} idle "
-                    "staging buffers and retrying", buffer_ci.size >> 20, e.what(), freed);
+    vk::Buffer buffer = memory_allocator.TryCreateBuffer(buffer_ci, usage);
+    if (!buffer) {
+        const size_t freed = ReleaseMemory();
+        LOG_WARNING(Render_Vulkan, "Staging buffer of {} MiB could not be made; freed {} idle "
+                    "staging buffers and retrying", buffer_ci.size >> 20, freed);
+        buffer = memory_allocator.TryCreateBuffer(buffer_ci, usage);
+    }
+    if (!buffer && !scheduler.IsRenderPassActive()) {
+        scheduler.Wait(scheduler.CurrentTick() - 1);
+        const size_t freed = ReleaseMemory();
+        LOG_WARNING(Render_Vulkan, "Staging buffer of {} MiB still could not be made; waited for "
+                    "GPU and freed {} buffers, retrying", buffer_ci.size >> 20, freed);
+        buffer = memory_allocator.TryCreateBuffer(buffer_ci, usage);
+    }
+    if (!buffer) {
         buffer = memory_allocator.CreateBuffer(buffer_ci, usage);
     }
     VideoCommon::Churn::Add(VideoCommon::Churn::StagingBuffers);
@@ -314,6 +315,22 @@ u64 StagingBufferPool::CachedBytes(MemoryUsage usage) {
         }
     }
     return bytes;
+}
+
+size_t StagingBufferPool::ReleaseMemory() {
+    size_t freed = 0;
+    for (StagingBuffersCache* cache : {&device_local_cache, &upload_cache, &download_cache}) {
+        for (StagingBuffers& level : *cache) {
+            const size_t before = level.entries.size();
+            std::erase_if(level.entries, [this](const StagingBuffer& entry) {
+                return !entry.deferred && scheduler.IsFree(entry.tick);
+            });
+            freed += before - level.entries.size();
+            level.iterate_index = 0;
+            level.delete_index = 0;
+        }
+    }
+    return freed;
 }
 
 void StagingBufferPool::ReleaseCache(MemoryUsage usage) {

@@ -2010,8 +2010,12 @@ private:
     /// faster than the display (FIFO would not show those frames; the host pacer holds them).
     /// "Monitor refresh" before the display's rate is known: 60 Hz.
     static std::chrono::nanoseconds OotHighRefreshInterval() {
+        if (const char* const env_cap = std::getenv("EDEN_NX2_OOT_HIGH_REFRESH_UNLIMITED"); env_cap && *env_cap != '0') {
+            return std::chrono::nanoseconds{0};
+        }
         long long hz = 0;
-        switch (Settings::values.oot_high_refresh_cap.GetValue()) {
+        const auto cap = Settings::values.oot_high_refresh_cap.GetValue();
+        switch (cap) {
         case Settings::OotRefreshCap::Hz90:
             hz = 90;
             break;
@@ -2024,9 +2028,13 @@ private:
         case Settings::OotRefreshCap::Hz165:
             hz = 165;
             break;
+        case Settings::OotRefreshCap::Unlimited:
         case Settings::OotRefreshCap::Display:
         default:
             break;
+        }
+        if (cap == Settings::OotRefreshCap::Unlimited) {
+            return std::chrono::nanoseconds{0};
         }
         const long long display =
             VideoCommon::Nx2Perf::g_display_refresh_ns.load(std::memory_order_relaxed);

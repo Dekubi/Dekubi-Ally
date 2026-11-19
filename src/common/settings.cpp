@@ -426,8 +426,7 @@ u32 FrameGenMultiplier() {
 }
 
 bool FrameGenActive() {
-    static const bool dekubi = std::string_view{Common::g_build_name} == "Lichii";
-    return values.frame_gen.GetValue() && !dekubi;
+    return values.frame_gen.GetValue();
 }
 
 namespace {
@@ -440,6 +439,28 @@ void SetOotHighRefreshPatched(bool patched) {
 
 bool OotHighRefreshPatched() {
     return oot_high_refresh_patched.load(std::memory_order_relaxed);
+}
+
+bool OcarinaMaxResolutionOn() {
+    if (const char* const value = std::getenv("EDEN_NX2_NO_MAX_RES"); value != nullptr) {
+        const std::string_view ab{value};
+        if (ab == "1") {
+            return false;
+        }
+        if (ab == "0") {
+            return true;
+        }
+    }
+    const auto it = values.disabled_addons.find(0x0400486024DEC000ULL);
+    if (it == values.disabled_addons.end()) {
+        return true;
+    }
+    for (const auto& name : it->second) {
+        if (name == "Max Resolution (built-in)") {
+            return false;
+        }
+    }
+    return true;
 }
 
 bool SpeedLimitEnabled() {

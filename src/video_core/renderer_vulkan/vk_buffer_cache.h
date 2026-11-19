@@ -94,6 +94,9 @@ private:
     u64 last_usage_tick{};
     bool is_null{};
     bool sparse_compatible{};
+
+    static vk::Buffer CreateBuffer(BufferCacheRuntime& runtime, u64 size,
+                                   VkDeviceSize sparse_alignment);
 };
 
 class QuadArrayIndexBuffer;
@@ -119,6 +122,10 @@ public:
 
     bool IsVertexRepacked(u32 binding) const {
         return (vertex_repack_mask & (1U << binding)) != 0;
+    }
+
+    bool AnyVertexRepacked() const {
+        return vertex_repack_mask != 0;
     }
 
     u64 CurrentTick();

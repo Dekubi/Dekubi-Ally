@@ -17,6 +17,7 @@
 #include <QPixmap>
 #include <QPushButton>
 #include <QSlider>
+#include <QScreen>
 #include <QStringLiteral>
 #include <QtCore/qobjectdefs.h>
 #include <qabstractbutton.h>
@@ -37,6 +38,7 @@
 #include "yuzu/configuration/configuration_shared.h"
 #include "yuzu/configuration/configure_graphics.h"
 #include "yuzu/configuration/amd_fsr4_panel.h"
+#include "yuzu/configuration/intel_xess_panel.h"
 #include "yuzu/configuration/nvidia_dlss_panel.h"
 #include "yuzu/configuration/shared_widget.h"
 
@@ -205,6 +207,7 @@ void ConfigureGraphics::UpdateDeviceSelection(int device) {
         vulkan_device = device;
     }
     UpdateAmdFsr4Visibility();
+    UpdateIntelXessVisibility();
 }
 
 ConfigureGraphics::~ConfigureGraphics() = default;
@@ -231,6 +234,9 @@ void ConfigureGraphics::Setup(const ConfigurationShared::Builder& builder) {
             continue;
         }
 #endif
+        if (setting->Id() == Settings::values.nvidia_dlss_version.Id()) {
+            continue;
+        }
 #ifndef EGLANTINE_STREAMLINE
         // Only builds with NVIDIA Streamline (Windows) can use it.
         if (setting->Id() == Settings::values.nvidia_dlss.Id() ||
@@ -246,6 +252,10 @@ void ConfigureGraphics::Setup(const ConfigurationShared::Builder& builder) {
                 return builder.BuildWidget(
                     setting, apply_funcs, ConfigurationShared::RequestType::ReverseSlider, true,
                     0.5f, nullptr, tr("%", "FSR/SGSR sharpening percentage (e.g. 50%)"));
+            } else if (setting->Id() == Settings::values.frame_gen_multiplier.Id()) {
+                return builder.BuildWidget(
+                    setting, apply_funcs, ConfigurationShared::RequestType::SpinBox, true,
+                    1.0f, nullptr, tr("x", "Frame multiplier suffix (e.g. 2x, 3x, 4x)"));
             } else {
                 return builder.BuildWidget(setting, apply_funcs);
             }
@@ -317,6 +327,20 @@ void ConfigureGraphics::Setup(const ConfigurationShared::Builder& builder) {
                 vsync_restore_global_button = restore_button;
             }
             hold_graphics.emplace(setting->Id(), widget);
+        } else if (setting->Id() == Settings::values.scaling_filter.Id() &&
+                   widget->combobox != nullptr) {
+            QWidget* group = new QWidget(this);
+            QVBoxLayout* group_layout = new QVBoxLayout(group);
+            group_layout->setContentsMargins(0, 0, 0, 0);
+            group_layout->setSpacing(2);
+            group_layout->addWidget(widget);
+            scaling_filter_combobox = widget->combobox;
+            filter_note = new QLabel(group);
+            filter_note->setWordWrap(true);
+            group_layout->addWidget(filter_note);
+            connect(scaling_filter_combobox, QOverload<int>::of(&QComboBox::currentIndexChanged),
+                    this, [this](int) { UpdateWindowFilterNote(); });
+            hold_graphics.emplace(setting->Id(), group);
         } else if (setting->Id() == Settings::values.aspect_ratio.Id()) {
             // Keep track of the aspect ratio combobox to update other UI tabs that need it
             aspect_ratio_combobox = widget->combobox;
@@ -324,6 +348,23 @@ void ConfigureGraphics::Setup(const ConfigurationShared::Builder& builder) {
         } else if (setting->Id() == Settings::values.resolution_setup.Id()) {
             // Keep track of the resolution combobox to update other UI tabs that need it
             resolution_combobox = widget->combobox;
+            if (resolution_combobox != nullptr) {
+                connect(resolution_combobox, QOverload<int>::of(&QComboBox::currentIndexChanged),
+                        this, [this](int) { UpdateWindowFilterNote(); });
+                // Filter rows outside 360p - 8K unless currently selected
+                if (auto* view = qobject_cast<QListView*>(resolution_combobox->view())) {
+                    for (int r = 0; r < resolution_combobox->count(); ++r) {
+                        Settings::ResolutionScalingInfo info{};
+                        Settings::TranslateResolutionInfo(
+                            static_cast<Settings::ResolutionSetup>(
+                                resolution_combobox->itemData(r).toUInt()),
+                            info);
+                        const u32 docked = 1080U * info.up_scale >> info.down_shift;
+                        view->setRowHidden(r, (docked < 360 || docked > 4320) &&
+                                                    r != resolution_combobox->currentIndex());
+                    }
+                }
+            }
             hold_graphics.emplace(setting->Id(), widget);
 #ifdef HAS_RESHADE
         } else if (setting->Id() == Settings::values.post_shader_enabled.Id()) {
@@ -369,8 +410,13 @@ void ConfigureGraphics::Setup(const ConfigurationShared::Builder& builder) {
             oot_aa_combobox = widget->combobox;
             amd_fsr4_panel = new AmdFsr4Panel(group);
             group_layout->addWidget(amd_fsr4_panel);
+            intel_xess_panel = new IntelXessPanel(group);
+            group_layout->addWidget(intel_xess_panel);
             connect(oot_aa_combobox, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
-                    [this](int) { UpdateAmdFsr4Visibility(); });
+                    [this](int) {
+                        UpdateAmdFsr4Visibility();
+                        UpdateIntelXessVisibility();
+                    });
             hold_graphics.emplace(setting->Id(), group);
         } else if (setting->Id() == Settings::values.frame_gen.Id()) {
             frame_gen_checkbox = widget->checkbox;
@@ -444,6 +490,7 @@ void ConfigureGraphics::Setup(const ConfigurationShared::Builder& builder) {
             }
         });
     }
+    UpdateWindowFilterNote();
 }
 
 const QString ConfigureGraphics::TranslateVSyncMode(VkPresentModeKHR mode,
@@ -548,6 +595,7 @@ void ConfigureGraphics::UpdateAPILayout() {
         vulkan_device_combobox->setCurrentIndex(vulkan_device);
     }
     UpdateAmdFsr4Visibility();
+    UpdateIntelXessVisibility();
 }
 
 void ConfigureGraphics::UpdateAmdFsr4Visibility() {
@@ -574,6 +622,19 @@ void ConfigureGraphics::UpdateAmdFsr4Visibility() {
     amd_fsr4_panel->setVisible(capable && fsr4_picked);
 }
 
+void ConfigureGraphics::UpdateIntelXessVisibility() {
+    if (oot_aa_combobox == nullptr || intel_xess_panel == nullptr) {
+        return;
+    }
+    const int xess_row =
+        oot_aa_combobox->findData(static_cast<u32>(Settings::OotAntiAliasing::Xess));
+    const bool xess_picked = xess_row >= 0 && oot_aa_combobox->currentIndex() == xess_row;
+    intel_xess_panel->setVisible(xess_picked);
+    if (xess_picked) {
+        intel_xess_panel->Refresh();
+    }
+}
+
 void ConfigureGraphics::RetrieveVulkanDevices() {
     vulkan_devices.clear();
     vulkan_devices.reserve(records.size());
@@ -589,6 +650,130 @@ void ConfigureGraphics::RetrieveVulkanDevices() {
     }
 }
 
+
+namespace {
+QString HeightName(u32 height) {
+    if (height == 2160) {
+        return QStringLiteral("4K");
+    }
+    if (height == 4320) {
+        return QStringLiteral("8K");
+    }
+    return QStringLiteral("%1p").arg(height);
+}
+
+QString FilterProsCons(Settings::ScalingFilter filter) {
+    using F = Settings::ScalingFilter;
+    switch (filter) {
+    case F::Area:
+        return ConfigureGraphics::tr("Cleanest when the picture is bigger than your screen. A bit "
+                                     "soft when stretching a smaller one.");
+    case F::ScaleForce:
+        return ConfigureGraphics::tr("Clean, sharp edges when stretching a smaller picture. "
+                                     "Shimmers when shrinking a bigger one.");
+    case F::Fsr:
+        return ConfigureGraphics::tr("Sharpest when stretching a smaller picture, can look "
+                                     "over-sharpened. Shimmers when shrinking.");
+    case F::Fsr3:
+        return ConfigureGraphics::tr("Like FSR 1 with softer sharpening. Shimmers when "
+                                     "shrinking.");
+    case F::Bicubic:
+    case F::ZeroTangent:
+        return ConfigureGraphics::tr("Balanced and sharp when stretching. Shimmers when "
+                                     "shrinking.");
+    case F::Mitchell:
+        return ConfigureGraphics::tr("Smooth with few halos. A little soft.");
+    case F::BSpline:
+        return ConfigureGraphics::tr("Very smooth. Blurry.");
+    case F::Lanczos:
+        return ConfigureGraphics::tr("Very sharp. Halos around bright edges, shimmers when "
+                                     "shrinking.");
+    case F::Spline1:
+        return ConfigureGraphics::tr("Sharp and light. Shimmers when shrinking.");
+    case F::Gaussian:
+        return ConfigureGraphics::tr("Very soft and never shimmers. Blurry.");
+    case F::Bilinear:
+        return ConfigureGraphics::tr("The cheapest. Soft, and shimmers when shrinking.");
+    case F::NearestNeighbor:
+        return ConfigureGraphics::tr("Crisp pixels at exactly 2x or 3x. Blocky otherwise.");
+    case F::Mmpx:
+        return ConfigureGraphics::tr("Made for pixel-art games, not OoT.");
+    case F::Sgsr:
+    case F::SgsrEdge:
+        return ConfigureGraphics::tr("A phone upscaler for Snapdragon chips, not tuned for PCs.");
+    case F::Xess:
+        return ConfigureGraphics::tr("Intel XeSS neural upscaling.");
+    case F::Auto:
+        break;
+    }
+    return {};
+}
+} // Anonymous namespace
+
+void ConfigureGraphics::UpdateWindowFilterNote() {
+    if (filter_note == nullptr || scaling_filter_combobox == nullptr ||
+        scaling_filter_combobox->currentIndex() < 0) {
+        return;
+    }
+    using F = Settings::ScalingFilter;
+    const auto& filters =
+        combobox_translations.at(Settings::EnumMetadata<F>::Index());
+    const auto row = static_cast<size_t>(scaling_filter_combobox->currentIndex());
+    if (row >= filters.size()) {
+        filter_note->clear();
+        return;
+    }
+    const auto filter = static_cast<F>(filters[row].first);
+
+    u32 picture = 0;
+    if (resolution_combobox != nullptr && resolution_combobox->currentIndex() >= 0) {
+        Settings::ResolutionScalingInfo info{};
+        Settings::TranslateResolutionInfo(
+            static_cast<Settings::ResolutionSetup>(
+                resolution_combobox->currentData().toUInt()),
+            info);
+        const u32 base = Settings::IsDockedMode() ? 1080U : 720U;
+        picture = base * info.up_scale >> info.down_shift;
+    }
+    const QScreen* const screen = window() != nullptr ? window()->screen() : nullptr;
+    const u32 screen_height =
+        screen != nullptr ? static_cast<u32>(qRound(screen->size().height() *
+                                                    screen->devicePixelRatio()))
+                          : 0;
+
+    const bool known = picture != 0 && screen_height != 0;
+    const bool bigger = known && picture * 20 > screen_height * 21;
+    const bool smaller = known && picture * 21 < screen_height * 20;
+    const F best = bigger ? F::Area : F::ScaleForce;
+    QString advice;
+    if (bigger) {
+        advice = tr("Your picture (%1) is bigger than your screen (%2): Area looks best.")
+                     .arg(HeightName(picture), HeightName(screen_height));
+    } else if (smaller) {
+        advice = tr("Your picture (%1) is smaller than your screen (%2): ScaleForce looks best, "
+                    "FSR 1 is sharper.")
+                     .arg(HeightName(picture), HeightName(screen_height));
+    } else if (known) {
+        advice = tr("Your picture matches your screen (%1): every filter looks the same.")
+                     .arg(HeightName(screen_height));
+    }
+
+    QString text;
+    if (filter == F::Auto) {
+        text = known ? tr("Auto uses %1 for you now, and switches by itself.")
+                           .arg(bigger ? tr("Area") : tr("ScaleForce"))
+                     : tr("Area when the picture is bigger than your screen, ScaleForce when it "
+                          "is smaller.");
+    } else {
+        text = FilterProsCons(filter);
+    }
+    if (!advice.isEmpty() && (filter == F::Auto || filter == best || !(bigger || smaller))) {
+        text += QStringLiteral("\n") + advice;
+    } else if (!advice.isEmpty()) {
+        text += QStringLiteral("\n") + advice + QStringLiteral(" ") + tr("Or pick Auto.");
+    }
+    filter_note->setText(text);
+}
 Settings::RendererBackend ConfigureGraphics::GetCurrentGraphicsBackend() const {
     const auto selected_backend = [&]() {
         auto const index = Settings::EnumMetadata<Settings::RendererBackend>::Index();

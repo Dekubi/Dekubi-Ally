@@ -262,7 +262,7 @@ ComputePipeline::ComputePipeline(const Device& device_, Scheduler& scheduler, vk
                           exception.what());
                 std::scoped_lock lock{build_mutex};
                 is_built = true;
-                build_condvar.notify_one();
+                build_condvar.notify_all();
                 if (shader_notify) {
                     shader_notify->MarkShaderComplete();
                 }
@@ -320,7 +320,7 @@ ComputePipeline::ComputePipeline(const Device& device_, Scheduler& scheduler, vk
                          exception.what());
             std::scoped_lock lock{build_mutex};
             is_built = true;
-            build_condvar.notify_one();
+            build_condvar.notify_all();
             if (shader_notify) {
                 shader_notify->MarkShaderComplete();
             }
@@ -342,7 +342,7 @@ ComputePipeline::ComputePipeline(const Device& device_, Scheduler& scheduler, vk
         spv_module.reset();
         std::scoped_lock lock{build_mutex};
         is_built = true;
-        build_condvar.notify_one();
+        build_condvar.notify_all();
         if (shader_notify) {
             shader_notify->MarkShaderComplete();
         }
@@ -382,12 +382,17 @@ bool ComputePipeline::CanReplaceOcarinaUpscale() const {
            std::ranges::none_of(info.storage_buffers_descriptors, &Shader::StorageBufferDescriptor::is_written);
 }
 
-bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
-                                Tegra::MemoryManager& gpu_memory, Scheduler& scheduler,
-                                BufferCache& buffer_cache, TextureCache& texture_cache,
-                                TextureCacheRuntime& texture_runtime,
-                                std::optional<ByteAddressedShadow>& shadow,
-                                BindCommand* deferred_bind) {
+bool ComputePipeline::WaitBuilt(std::chrono::microseconds timeout) {
+    std::unique_lock lock{build_mutex};
+    return build_condvar.wait_for(lock, timeout,
+                                  [this] { return is_built.load(std::memory_order::relaxed); });
+}
+
+ComputePipeline::ConfigureResult ComputePipeline::Configure(
+    Tegra::Engines::KeplerCompute& kepler_compute, Tegra::MemoryManager& gpu_memory,
+    Scheduler& scheduler, BufferCache& buffer_cache, TextureCache& texture_cache,
+    TextureCacheRuntime& texture_runtime, PipelineCache& pipelines,
+    std::optional<ByteAddressedShadow>& shadow, BindCommand* deferred_bind) {
     shadow.reset();
     guest_descriptor_queue.Acquire(scheduler, num_descriptor_entries, uses_descriptor_buffer);
 
@@ -419,24 +424,23 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
     const auto& qmd{kepler_compute.launch_description};
     const auto& cbufs{qmd.const_buffer_config};
     const bool via_header_index{qmd.linked_tsc != 0};
+    const auto cbuf_address{[&](u32 cbuf) -> GPUVAddr {
+        return cbuf < cbufs.size() && ((qmd.const_buffer_enable_mask >> cbuf) & 1) != 0
+                   ? cbufs[cbuf].Address()
+                   : GPUVAddr{};
+    }};
+    // EDEN_NX2_HANDLE_ALIGN=0 reads a handle program's words at the unaligned address (A/B).
+    static const bool align_storage{[] {
+        const char* const value{std::getenv("EDEN_NX2_HANDLE_ALIGN")};
+        return value == nullptr || *value != '0';
+    }()};
+    const u64 handle_alignment{align_storage ? device.GetStorageBufferAlignment() : 1};
     const auto read_handle{[&](const auto& desc, u32 index) {
         if (desc.handle_program != ~0U) {
             // Read by the shader from a storage buffer: computed for this dispatch.
-            // EDEN_NX2_HANDLE_ALIGN=0 reads the words at the unaligned address (A/B).
-            static const bool align_storage{[] {
-                const char* const value{std::getenv("EDEN_NX2_HANDLE_ALIGN")};
-                return value == nullptr || *value != '0';
-            }()};
-            return TexturePair(VideoCommon::EvaluateTextureHandle(
-                                   info, desc.handle_program, gpu_memory,
-                                   [&](u32 cbuf) -> GPUVAddr {
-                                       return cbuf < cbufs.size() &&
-                                                      ((qmd.const_buffer_enable_mask >> cbuf) &
-                                                       1) != 0
-                                                  ? cbufs[cbuf].Address()
-                                                  : GPUVAddr{};
-                                   },
-                                   align_storage ? device.GetStorageBufferAlignment() : 1),
+            return TexturePair(VideoCommon::EvaluateTextureHandle(info, desc.handle_program,
+                                                                  gpu_memory, cbuf_address,
+                                                                  handle_alignment, index),
                                via_header_index);
         }
         ASSERT(((qmd.const_buffer_enable_mask >> desc.cbuf_index) & 1) != 0);
@@ -475,7 +479,35 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
     }
     // EDEN_NX2_EXP21 (default 1; 0 = off): no texture for a handle that is a buffer address.
     const bool null_pointer_handles{VideoCore::Nx2Debug::Experiment(21) != 0};
+    u32 texture{};
     for (const auto& desc : info.texture_descriptors) {
+        if (desc.count > 1 && desc.handle_program != ~0U) {
+            // A table of handles the shader indexes, read in one go; elements repeating a
+            // sampler share its lookup (zortos293/Lichii#1485).
+            const size_t first{views.size()};
+            u32 last_sampler_index{~0U};
+            VideoCommon::SamplerId sampler{};
+            VideoCommon::EvaluateTextureHandles(
+                info, desc.handle_program, gpu_memory, cbuf_address, handle_alignment, desc.count,
+                [&](u32, u32 raw) {
+                    const auto handle{TexturePair(raw, via_header_index)};
+                    views.push_back({handle.first});
+                    if (handle.second != last_sampler_index) {
+                        sampler = texture_cache.GetSamplerId(handle.second, true);
+                        last_sampler_index = handle.second;
+                    }
+                    samplers.push_back(sampler);
+                });
+            if (VideoCommon::HandleTableNotes::Wanted()) {
+                std::vector<u32> tics(desc.count);
+                for (u32 index = 0; index < desc.count; ++index) {
+                    tics[index] = views[first + index].index;
+                }
+                VideoCommon::HandleTableNotes::Note(shader_hash, texture, tics);
+            }
+            ++texture;
+            continue;
+        }
         for (u32 index = 0; index < desc.count; ++index) {
             const auto handle{null_pointer_handles &&
                                       VideoCommon::HandleIsStoragePointer(info, desc, index)
@@ -486,6 +518,7 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
             VideoCommon::SamplerId sampler = texture_cache.GetSamplerId(handle.second, true);
             samplers.push_back(sampler);
         }
+        ++texture;
     }
     for (const auto& desc : info.image_descriptors) {
         add_image(desc, desc.is_written);
@@ -617,6 +650,20 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
     std::ranges::for_each(info.texture_buffer_descriptors, add_buffer);
     std::ranges::for_each(info.image_buffer_descriptors, add_buffer);
 
+    // Decided before the bindings below mark the outputs GPU-written. The Ocarina upscale passes,
+    // which FSR or DLSS may replace, wait as before.
+    if (!is_built.load(std::memory_order::relaxed) && kepler_compute.IsNativeMode() &&
+        !CanReplaceOcarinaUpscale()) {
+        const bool images_hold_shader_writes =
+            std::ranges::all_of(written_images, [&](VideoCommon::ImageViewId id) {
+                return texture_cache.StorageViewHoldsShaderWrites(id);
+            });
+        if (pipelines.SkipUnbuiltDispatch(
+                *this, images_hold_shader_writes && buffer_cache.ComputeWritesHoldGpuData())) {
+            return ConfigureResult::Skipped;
+        }
+    }
+
     {
         const Profile::Scope resolve_scope{Profile::Zone::ComputeResolve};
         buffer_cache.UpdateComputeBuffers();
@@ -658,7 +705,7 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
     if (guest_descriptor_queue.UpdateCount() != num_descriptor_entries) {
         LOG_CRITICAL(Render_Vulkan, "Compute descriptor count mismatch: expected {}, got {}",
                      num_descriptor_entries, guest_descriptor_queue.UpdateCount());
-        return false;
+        return ConfigureResult::Failed;
     }
 
     if (!is_built.load(std::memory_order::relaxed)) {
@@ -684,7 +731,7 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
             descriptor_buffer_ring.Allocate(scheduler, descriptor_buffer_layout.size)};
         if (!alloc.host) {
             LOG_DEBUG(Render_Vulkan, "Failed to reserve descriptor memory, skipping dispatch");
-            return false;
+            return ConfigureResult::Failed;
         }
         WriteDescriptorBuffer(device, descriptor_buffer_layout, descriptor_data, alloc.host);
         descriptor_buffer_offset = alloc.offset;
@@ -702,8 +749,7 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
         for (const auto& desc : info.image_descriptors) {
             for (u32 i = 0; i < desc.count; ++i, ++image_index) {
                 if (desc.is_written) {
-                    texture_cache.MarkModification(
-                        texture_cache.GetImageView(views[image_index].id).image_id);
+                    texture_cache.MarkStorageWrite(views[image_index].id);
                 }
             }
         }
@@ -750,7 +796,7 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
     } else {
         scheduler.Record(std::move(bind));
     }
-    return true;
+    return ConfigureResult::Ready;
 }
 
 } // namespace Vulkan

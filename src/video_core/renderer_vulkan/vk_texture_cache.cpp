@@ -216,7 +216,7 @@ constexpr VkBorderColor ConvertBorderColor(const std::array<float, 4>& color) {
 [[nodiscard]] bool IsUnevenMipRgba8Astc(const Device& device, const ImageInfo& info) {
     if (!IsPixelFormatASTC(info.format) || device.IsOptimalAstcSupported() ||
         info.type != ImageType::e2D || info.size.depth != 1 || info.resources.levels <= 1 ||
-        Settings::AstcDecodeMode::Gpu != Settings::AstcDecodeMode::Gpu ||
+        Settings::values.accelerate_astc.GetValue() != Settings::AstcDecodeMode::Gpu ||
         Settings::GetAstcRecompression() == Settings::AstcRecompression::Uncompressed) {
         return false;
     }
@@ -377,7 +377,7 @@ constexpr std::array<VkFormat, 2> OpaqueAstcViewFormats{VK_FORMAT_BC1_RGBA_UNORM
         info.type != ImageType::e2D || info.size.depth != 1) {
         return false;
     }
-    return Settings::AstcDecodeMode::Gpu == Settings::AstcDecodeMode::Gpu &&
+    return Settings::values.accelerate_astc.GetValue() == Settings::AstcDecodeMode::Gpu &&
            Settings::GetAstcRecompression() != Settings::AstcRecompression::Uncompressed;
 }
 
@@ -388,7 +388,7 @@ constexpr std::array<VkFormat, 2> OpaqueAstcViewFormats{VK_FORMAT_BC1_RGBA_UNORM
     if (IsHugeAstcArray(device, info) || IsUnevenMipRgba8Astc(device, info)) {
         return true;
     }
-    if (Settings::AstcDecodeMode::Gpu != Settings::AstcDecodeMode::Gpu) {
+    if (Settings::values.accelerate_astc.GetValue() != Settings::AstcDecodeMode::Gpu) {
         return false;
     }
     return Settings::GetAstcRecompression() == Settings::AstcRecompression::Uncompressed &&
@@ -1312,7 +1312,7 @@ TextureCacheRuntime::TextureCacheRuntime(const Device& device_, Scheduler& sched
     // Before anything below reads astc_recompression (passes, view formats).
     UseBc3ForSwitch2OnSmallCards(device);
     // Huge ASTC arrays always decode on the GPU (IsHugeAstcArray), whatever the decode setting.
-    if (Settings::AstcDecodeMode::Gpu == Settings::AstcDecodeMode::Gpu ||
+    if (Settings::values.accelerate_astc.GetValue() == Settings::AstcDecodeMode::Gpu ||
         !device.IsOptimalAstcSupported()) {
         astc_decoder_pass.emplace(device, scheduler, descriptor_pool, staging_buffer_pool,
                                   compute_pass_descriptor_queue, memory_allocator);
@@ -2851,6 +2851,11 @@ u64 TextureCacheRuntime::GetDeviceMemoryBudget() const {
 
 u64 TextureCacheRuntime::GetDeviceMemorySlack() const {
     return device.GetDeviceMemorySlack();
+}
+
+u32 TextureCacheRuntime::GetMaxScaledExtent() const noexcept {
+    return (std::min)({device.GetMaxImageDimension2D(), device.GetMaxFramebufferWidth(),
+                       device.GetMaxFramebufferHeight()});
 }
 
 bool TextureCacheRuntime::CanDownloadMsaa(const VideoCommon::ImageInfo& info) const {

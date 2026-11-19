@@ -17,6 +17,7 @@
 #include <vector>
 
 #include <QApplication>
+#include <QComboBox>
 #include <QDesktopServices>
 #include <QDialog>
 #include <QDialogButtonBox>
@@ -35,6 +36,7 @@
 #include "common/common_types.h"
 #include "common/fs/fs_util.h"
 #include "common/logging.h"
+#include "common/settings.h"
 #include "video_core/vulkan_common/streamline.h"
 #include "yuzu/configuration/nvidia_dlss_panel.h"
 
@@ -326,6 +328,15 @@ NvidiaDlssPanel::NvidiaDlssPanel(QWidget* parent) : QWidget(parent) {
     status_row->addWidget(icon_label);
     status_row->addWidget(status_label, 1);
 
+    QHBoxLayout* version_row = new QHBoxLayout;
+    version_row->setContentsMargins(24, 0, 0, 0);
+    version_row->setSpacing(8);
+    QLabel* version_label = new QLabel(Tr("DLSS Version:"), this);
+    version_combobox = new QComboBox(this);
+    version_combobox->setToolTip(Tr("Select which DLSS neural model to use (Auto, DLSS 5 mod, DLSS 4, or custom versions)."));
+    version_row->addWidget(version_label);
+    version_row->addWidget(version_combobox, 1);
+
     QHBoxLayout* button_row = new QHBoxLayout;
     button_row->setContentsMargins(24, 0, 0, 0);
     download_button = new QPushButton(this);
@@ -343,7 +354,18 @@ NvidiaDlssPanel::NvidiaDlssPanel(QWidget* parent) : QWidget(parent) {
     button_row->addWidget(about);
 
     layout->addLayout(status_row);
+    layout->addLayout(version_row);
     layout->addLayout(button_row);
+
+    connect(version_combobox, qOverload<int>(&QComboBox::currentIndexChanged), this,
+            [this](int index) {
+                if (index < 0 || version_combobox->signalsBlocked()) {
+                    return;
+                }
+                const QString id = version_combobox->itemData(index).toString();
+                Settings::values.nvidia_dlss_version.SetValue(id.toStdString());
+                Refresh();
+            });
 
     connect(download_button, &QPushButton::clicked, this, [this] { Download(); });
     connect(folder_button, &QPushButton::clicked, this, [] {
@@ -362,12 +384,30 @@ void NvidiaDlssPanel::showEvent(QShowEvent* event) {
 
 void NvidiaDlssPanel::Refresh() {
     const Streamline::DlssFiles files = Streamline::FindDlssFiles();
+    const auto available_models = Streamline::GetAvailableDlssModels();
+
+    version_combobox->blockSignals(true);
+    version_combobox->clear();
+    const std::string current_val = Settings::values.nvidia_dlss_version.GetValue();
+    int current_index = 0;
+    for (size_t i = 0; i < available_models.size(); ++i) {
+        const auto& m = available_models[i];
+        version_combobox->addItem(QString::fromStdString(m.name), QString::fromStdString(m.id));
+        if (m.id == current_val) {
+            current_index = static_cast<int>(i);
+        }
+    }
+    version_combobox->setCurrentIndex(current_index);
+    version_combobox->blockSignals(false);
+
     const bool has_loader = !files.interposer.empty();
     const bool has_model = !files.model.empty() || !files.app_model.empty();
-    const QString dlss = !files.model.empty()
-                             ? Named(QStringLiteral("DLSS"), files.model_version)
-                             : Tr("%1 from the NVIDIA app")
-                                   .arg(Named(QStringLiteral("DLSS"), files.app_model_version));
+    const QString dlss = !files.active_version_name.empty()
+                             ? QString::fromStdString(files.active_version_name)
+                             : (!files.model.empty()
+                                    ? Named(QStringLiteral("DLSS"), files.model_version)
+                                    : Tr("%1 from the NVIDIA app")
+                                          .arg(Named(QStringLiteral("DLSS"), files.app_model_version)));
 
     QString status;
     QString button;

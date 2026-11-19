@@ -133,7 +133,10 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
                         Common::Nx2Timeline::Instant("front: list end", {"seq", next.fence});
                     }
                 } else if (std::holds_alternative<GPUTickCommand>(next.data)) {
-                    split.Defer([gpu = &system.GPU()] { gpu->TickWork(); });
+                    // TickWork ends fast draw reuse itself when it runs a request.
+                    split.Defer([gpu = &system.GPU()] { gpu->TickWork(); },
+                                VideoCommon::GpuSplit::Effect::Unknown,
+                                VideoCommon::GpuSplit::FastDrawNeutral);
                 } else if (auto* run = std::get_if<RunCommand>(&next.data)) {
                     if (run->before_later_reads) {
                         // GPU memory maps unmap caches (UnmapMemory downloads): the back's state.
@@ -144,13 +147,19 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
                         split.NoteMemoryWrite();
                     }
                 } else if (const auto* flush = std::get_if<FlushRegionCommand>(&next.data)) {
-                    split.Defer([rasterizer_ptr, addr = flush->addr, size = flush->size] {
-                        rasterizer_ptr->FlushRegion(addr, size);
-                    });
+                    split.Defer(
+                        [rasterizer_ptr, addr = flush->addr, size = flush->size] {
+                            rasterizer_ptr->FlushRegion(addr, size);
+                        },
+                        VideoCommon::GpuSplit::Effect::Unknown,
+                        VideoCommon::GpuSplit::CallTag(VideoCommon::Nx2FastDraw::CallSite::FlushRegion));
                 } else if (const auto* invalidate = std::get_if<InvalidateRegionCommand>(&next.data)) {
-                    split.Defer([rasterizer_ptr, addr = invalidate->addr, size = invalidate->size] {
-                        rasterizer_ptr->OnCacheInvalidation(addr, size);
-                    });
+                    split.Defer(
+                        [rasterizer_ptr, addr = invalidate->addr, size = invalidate->size] {
+                            rasterizer_ptr->OnCacheInvalidation(addr, size);
+                        },
+                        VideoCommon::GpuSplit::Effect::Unknown,
+                        VideoCommon::GpuSplit::CallTag(VideoCommon::Nx2FastDraw::CallSite::Invalidate));
                 } else {
                     ASSERT(false);
                 }
@@ -158,7 +167,7 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
                     [state_ptr = &state, fence = next.fence, block = next.block] {
                         SignalCommand(*state_ptr, fence, block);
                     },
-                    VideoCommon::GpuSplit::Effect::None);
+                    VideoCommon::GpuSplit::Effect::None, VideoCommon::GpuSplit::FastDrawNeutral);
                 split.Publish();
                 continue;
             }

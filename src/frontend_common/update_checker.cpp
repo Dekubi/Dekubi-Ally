@@ -33,9 +33,10 @@ std::optional<u64> ParseBuildNumber(std::string_view tag) {
     return number;
 }
 
-constexpr std::string_view ReleaseRepo = "Frizti/Lichii";
-// Download URLs name the repository by its current name; GitHub redirects the old one.
-constexpr std::array RepoNames{std::string_view{"Lichii"}, std::string_view{"Dekubi"}};
+// Dekubi's own releases: github.com/Dekubi/Dekubi-Ally. Downloads are only taken from there.
+constexpr std::string_view ReleaseOwner = "Dekubi";
+constexpr std::string_view ReleaseRepo = "Dekubi/Dekubi-Ally";
+constexpr std::array RepoNames{std::string_view{"Dekubi-Ally"}};
 
 std::optional<u32> ParseNumber(std::string_view text) {
     if (text.empty() || (text.size() > 1 && text.front() == '0') ||
@@ -51,10 +52,15 @@ std::optional<u32> ParseNumber(std::string_view text) {
 }
 
 CheckResult CheckDekubi([[maybe_unused]] const DekubiVersion& current) {
-#ifndef _WIN32
-    // Dekubi only publishes Windows packages.
+#if !defined(_WIN32) && !defined(__linux__)
     return {};
 #else
+#ifdef __linux__
+    // On Linux only the AppImage replaces itself; the tar.gz is updated by hand.
+    if (Common::Net::CurrentLinuxPackage() != Common::Net::LinuxPackage::AppImage) {
+        return {};
+    }
+#endif
     auto source = DefaultSource();
     if (const char* override_url = std::getenv("EDEN_UPDATE_URL");
         override_url != nullptr && *override_url != '\0') {
@@ -206,7 +212,9 @@ std::optional<DekubiVersion> RunningVersion() {
 }
 
 std::optional<DekubiVersion> ParseDekubiTag(std::string_view tag) {
-    for (const std::string_view prefix : {"dekubi-v", "frizti-v"}) {
+    // Release tags are "v1.1.2" (also "V1.1.2" or "dekubi-v1.1.2"); anything after the version
+    // ("V1.0.0-Stable") is not a release the updater offers.
+    for (const std::string_view prefix : {"dekubi-v", "v", "V"}) {
         if (tag.starts_with(prefix)) {
             return ParseDekubiVersion(tag.substr(prefix.size()));
         }
@@ -215,7 +223,11 @@ std::optional<DekubiVersion> ParseDekubiTag(std::string_view tag) {
 }
 
 std::string DekubiAssetName(const DekubiVersion& version) {
-    return fmt::format("Dekubi-v{}-Windows-x64.zip", version.ToString());
+    return fmt::format("Dekubi_Ally_v{}_Windows_x64.zip", version.ToString());
+}
+
+std::string DekubiAppImageName(const DekubiVersion& version) {
+    return fmt::format("Dekubi_Ally-v{}-linux-x86_64.AppImage", version.ToString());
 }
 
 Source DefaultSource() {
@@ -262,7 +274,11 @@ std::optional<Common::Net::Asset> SelectDekubiAsset(const Common::Net::Release& 
     if (!version) {
         return std::nullopt;
     }
+#ifdef __linux__
+    const auto filename = DekubiAppImageName(*version);
+#else
     const auto filename = DekubiAssetName(*version);
+#endif
     for (const auto& url : release.assets) {
         std::string origin;
         if (source.test) {
@@ -273,8 +289,8 @@ std::optional<Common::Net::Asset> SelectDekubiAsset(const Common::Net::Release& 
             }
         } else {
             for (const auto repo : RepoNames) {
-                if (url == fmt::format("https://github.com/Frizti/{}/releases/download/{}/{}", repo,
-                                       release.tag, filename)) {
+                if (url == fmt::format("https://github.com/{}/{}/releases/download/{}/{}",
+                                       ReleaseOwner, repo, release.tag, filename)) {
                     origin = "https://github.com";
                 }
             }

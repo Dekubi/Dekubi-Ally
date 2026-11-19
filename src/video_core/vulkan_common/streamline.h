@@ -16,6 +16,14 @@
 
 namespace Vulkan::Streamline {
 
+struct DlssModelEntry {
+    std::string id;
+    std::string name;
+    std::string version;
+    std::filesystem::path path;
+    bool ready{false};
+};
+
 /// NVIDIA's files DLSS needs, as found on this PC. Paths are empty when missing.
 struct DlssFiles {
     std::filesystem::path folder;     ///< Where the loader is, or where it should go
@@ -25,7 +33,10 @@ struct DlssFiles {
     std::string interposer_version;
     std::string model_version;
     std::string app_model_version;
+    std::string active_version_name;
 };
+
+[[nodiscard]] std::vector<DlssModelEntry> GetAvailableDlssModels();
 
 [[nodiscard]] DlssFiles FindDlssFiles();
 

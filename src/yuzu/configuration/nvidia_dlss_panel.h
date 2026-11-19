@@ -10,6 +10,7 @@
 
 #include <QWidget>
 
+class QComboBox;
 class QLabel;
 class QPushButton;
 
@@ -27,6 +28,7 @@ private:
 
     QLabel* icon_label;
     QLabel* status_label;
+    QComboBox* version_combobox;
     QPushButton* download_button;
     QPushButton* folder_button;
 };

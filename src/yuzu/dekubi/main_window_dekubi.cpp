@@ -9,14 +9,27 @@
 #include <QStatusBar>
 #include <QTimer>
 
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
+
 #include "core/core.h"
+#include "qt_common/config/uisettings.h"
 #include "qt_common/qt_common.h"
 #include "qt_common/util/game.h"
 #include "ui_main.h"
 #include "yuzu/dekubi/dekubi_ui.h"
+#include "yuzu/dekubi/switches_window.h"
 #include "yuzu/bootmanager.h"
 #include "yuzu/dekubi/game_controls.h"
 #include "yuzu/dekubi/home.h"
+#include "yuzu/dekubi/mod_menu.h"
 #include "yuzu/dekubi/precompile_gate.h"
 #include "yuzu/dekubi/whats_new.h"
 #include "yuzu/game/game_list.h"
@@ -57,7 +70,12 @@ void MainWindow::SetUpLichiiUi() {
         *ui, *this,
         {.export_log = [this] { OnExportLog(); },
          .whats_new = [this] { LichiiUi::ShowWhatsNew(this); },
-         .delete_shader_cache = [delete_shader_cache] { delete_shader_cache(OcarinaOfTime); }});
+         .delete_shader_cache = [delete_shader_cache] { delete_shader_cache(OcarinaOfTime); },
+         .switches =
+             [this] {
+                 LichiiUi::ShowSwitchesWindow(
+                     this, [this] { return emulation_running || boot_in_progress; });
+             }});
 
     // "What's new" once per version after an update, when nothing else is on screen: no other
     // dialog (first-launch question, update offer, restart note) and no game running.
@@ -82,6 +100,44 @@ void MainWindow::SetUpLichiiUi() {
     } else if (!used_before) {
         OnSaveConfig(); // a first install recorded its version
     }
+
+#ifdef _WIN32
+    // On 8 GB PCs, remind once to set Windows virtual memory (page file) to at least 16 GB.
+    if (!UISettings::values.pagefile_notice_shown.GetValue()) {
+        MEMORYSTATUSEX mem{};
+        mem.dwLength = sizeof(mem);
+        if (GlobalMemoryStatusEx(&mem)) {
+            constexpr u64 GiB = 1024ULL * 1024ULL * 1024ULL;
+            const u64 phys_ram = mem.ullTotalPhys;
+            const u64 commit_limit = mem.ullTotalPageFile;
+            const u64 pagefile_size = commit_limit > phys_ram ? (commit_limit - phys_ram) : 0;
+            if (phys_ram <= 9 * GiB && pagefile_size < 12 * GiB) {
+                auto* timer = new QTimer(this);
+                timer->setInterval(1500);
+                connect(timer, &QTimer::timeout, this, [this, timer] {
+                    const bool first_question_pending =
+                        !launched_with_game && !Settings::values.oot_fps_asked.GetValue();
+                    if (QApplication::activeModalWidget() != nullptr || first_question_pending ||
+                        emulation_running || boot_in_progress) {
+                        return;
+                    }
+                    timer->stop();
+                    timer->deleteLater();
+                    UISettings::values.pagefile_notice_shown.SetValue(true);
+                    OnSaveConfig();
+                    QMessageBox::information(
+                        this, tr("Virtual Memory"),
+                        tr("Your PC has 8 GB of RAM. Ocarina of Time needs more memory than that, "
+                           "so Windows uses the page file. To avoid out-of-memory crashes, set "
+                           "Windows virtual memory (page file) to at least 16 GB: Settings > "
+                           "System > About > Advanced system settings > Performance Settings > "
+                           "Advanced > Virtual memory."));
+                });
+                timer->start();
+            }
+        }
+    }
+#endif
 
     // Status bar: the everyday controls stay (60/30 FPS, docked, volume); renderer, accuracy,
     // filter, anti-aliasing and effects move into one Graphics button. The old buttons stay
@@ -168,6 +224,13 @@ void MainWindow::SetUpLichiiUi() {
             &LichiiUi::PrecompileGate::OnEmulationStarting);
     connect(this, &MainWindow::EmulationStopping, gate,
             &LichiiUi::PrecompileGate::OnEmulationStopping);
+
+    // OoT's mod menu (F2 or the Mods button).
+    auto* mod_menu = new LichiiUi::ModMenu(this, statusBar());
+    connect(this, &MainWindow::EmulationStarting, mod_menu,
+            &LichiiUi::ModMenu::OnEmulationStarting);
+    connect(this, &MainWindow::EmulationStopping, mod_menu,
+            &LichiiUi::ModMenu::OnEmulationStopping);
 }
 
 

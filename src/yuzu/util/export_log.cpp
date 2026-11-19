@@ -336,7 +336,7 @@ void Export(QWidget* parent, const std::vector<VkDeviceInfo::Record>& vk_device_
         add_log(usual_path, QStringLiteral("log-stuck-process.txt"),
                 QObject::tr("the log of a Dekubi that was still running when this one started"));
         included << QStringLiteral(
-            "WARNING: another lichii.exe was still running when this session started. End it in "
+            "WARNING: another dekubi.exe was still running when this session started. End it in "
             "Task Manager (or restart the PC), then start Dekubi again.");
     } else {
         add_log(previous_path, QStringLiteral("log-previous-session.txt"),

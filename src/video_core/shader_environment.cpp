@@ -1657,6 +1657,13 @@ bool FileEnvironment::AnswersHoldFor(Shader::Environment& live, const char** why
                            index, offset, static_cast<u32>((key >> 40) & 0x3fffff))
                      : live.IsCbufStorageBufferPointer(index, offset);
         if (live_mapped != (mapped != 0)) {
+            // Pointer tolerance in AnswersHoldFor:
+            // For compute shaders, allow pointer tolerance: null/unmapped pointer slots bind
+            // null descriptor views rather than failing AnswersHoldFor and causing a multi-second recompile freeze.
+            // If the slot later points to valid memory, StaleNullPointerSlot will rebuild on worker.
+            if (stage == Shader::Stage::Compute) {
+                continue;
+            }
             return fail("storage buffer pointer");
         }
     }

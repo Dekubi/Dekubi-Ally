@@ -21,6 +21,7 @@
 
 #include "common/common_types.h"
 #include "video_core/engines/engine_interface.h"
+#include "video_core/nx2_fast_draw.h"
 #include "video_core/split_write_tracker.h"
 
 namespace Core {
@@ -354,13 +355,25 @@ public:
         }
     }
 
+    /// Defer flag: the call doesn't end fast draw reuse (nx2_fast_draw.h).
+    static constexpr u64 FastDrawNeutral = 1 << 7;
+    /// Defer flag: names the call's site in the fast draw break counts (bits 32-39).
+    static constexpr u64 CallTag(Nx2FastDraw::CallSite site) {
+        return u64{static_cast<u8>(site)} << 32;
+    }
+    /// FastDrawNeutral while EXP64 is on (occlusion query work, nx2_fast_draw.h).
+    static u64 QueryNeutral() {
+        return Nx2FastDraw::QueriesNeutral() ? FastDrawNeutral : 0;
+    }
+
     /// Runs `func` on the back after everything sent before it. Must be trivially copyable.
+    /// `flags`: FastDrawNeutral when `func` can't change what a draw resolves to, CallTag.
     template <typename Func>
-    void Defer(const Func& func, Effect effect = Effect::Unknown) {
+    void Defer(const Func& func, Effect effect = Effect::Unknown, u64 flags = 0) {
         static_assert(std::is_trivially_copyable_v<Func> && alignof(Func) <= alignof(u64));
         constexpr size_t payload = (sizeof(Func) + sizeof(u64) - 1) / sizeof(u64);
         u64* const entry = Reserve(2 + payload);
-        entry[0] = static_cast<u64>(Kind::Call) | (u64{payload} << 8);
+        entry[0] = static_cast<u64>(Kind::Call) | flags | (u64{payload} << 8);
         entry[1] = reinterpret_cast<u64>(&CallThunk<Func>);
         std::memcpy(entry + 2, &func, sizeof(Func));
         Commit(2 + payload, effect);
@@ -370,12 +383,13 @@ public:
     /// cache download that records into the Vulkan scheduler. A drained back still submits from
     /// its idle hook, so the front never touches that state itself.
     template <typename Func>
-    void Run(const Func& func, DrainSite site = DrainSite::Other) {
+    void Run(const Func& func, DrainSite site = DrainSite::Other,
+             u64 flags = CallTag(Nx2FastDraw::CallSite::Run)) {
         if (on_back_thread || !active) {
             func();
             return;
         }
-        Defer(func);
+        Defer(func, Effect::Unknown, flags);
         Drain(site);
     }
 

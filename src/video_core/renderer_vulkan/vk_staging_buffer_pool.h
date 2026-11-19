@@ -40,6 +40,9 @@ public:
     StagingBufferRef Request(size_t size, MemoryUsage usage, bool deferred = false);
     void FreeDeferred(StagingBufferRef& ref);
 
+    /// Releases all idle staging buffers across all levels and returns count of buffers freed.
+    size_t ReleaseMemory();
+
     [[nodiscard]] VkBuffer StreamBuf() const noexcept {
         return *stream_buffer;
     }

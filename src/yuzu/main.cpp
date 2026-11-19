@@ -37,6 +37,7 @@
 #endif
 
 #include "main_window.h"
+#include "dekubi/switches_window.h"
 #include "yuzu/dekubi/dekubi_ui.h"
 #ifdef ENABLE_UPDATE_CHECKER
 #include "updater/update_dialog.h"
@@ -204,29 +205,159 @@ constexpr std::pair<const char*, const char*> BuiltinSwitches[] = {
     // has its own recompiler). Owner's call for v5.7 after the 2026-11-10 playtests: Kakariko
     // felt much better; repeat compiles after reloads 294 -> 8 ms in the night tests.
     {"EDEN_NX2_JIT_WARM", "1"},
+    // v6 optimizations:
+    {"FRITCHII_GATHER_ONE_LOCK", "1"},    {"FRITCHII_GATHER_EMPTY_TEST", "1"},
+    {"FRITCHII_FENCE_COMMIT_FAST", "1"},  {"FRITCHII_FRONT_RAN_READS", "1"},
+    {"FRITCHII_VERTEX_INPUT_COMPACT", "1"}, {"FRITCHII_BIND_ADDR_MEMO", "1"},
+    {"FRITCHII_WORKER_SPIN", "20"},       {"FRITCHII_CB_WORDS_BLOCK", "1"},
+    {"EDEN_NX2_WORKER_SPIN", "20"},
+    {"FRITCHII_BANK_FLAGGED", "1"},
+    {"EDEN_NX2_EXP47", "1"},
+    {"EDEN_NX2_EXP15", "1"},
+    {"EDEN_NX2_EXP38", "1"},
+    {"EDEN_NX2_EXP44", "1"},
+    {"EDEN_NX2_EXP46", "1"},
+    // Recompiler
+    {"FRITCHII_JIT_INDIRECT_CACHE", "2"}, {"FRITCHII_JIT_RSQRT_ZERO", "2"},
+    {"FRITCHII_JIT_NO_FRAME_POINTER", "1"}, {"FRITCHII_JIT_FLAG_BRANCH", "2"},
+    {"FRITCHII_JIT_FAR_CODE", "1"},       {"FRITCHII_JIT_CHAIN", "6"},
+    {"FRITCHII_JIT_BLOCK_LIST", "1"},     {"FRITCHII_JIT_INLINE_CNTPCT", "1"},
+    {"FRITCHII_JIT_STATE_REFS", "1"},     {"FRITCHII_JIT_SHARED", "1"},
+    {"FRITCHII_STORE_MEMO", "2"},
+    // GPU front and back optimizations
+    {"FRITCHII_MEMSTAGE_TICKS", "1"},     {"FRITCHII_STAMP_READ_PAGES", "2"},
+    {"FRITCHII_NOTED_FAST", "1"},         {"FRITCHII_FRONT_ASYNC_TABLE", "1"},
+    {"FRITCHII_DEPTH_POOL_BIG", "1"},     {"FRITCHII_RAM_GPU_ENTRIES", "1"},
+    {"FRITCHII_SMALL_CARD", "2"},         {"FRITCHII_READ_SIDE_COPY", "3"},
+    {"FRITCHII_GPU_SIBLINGS_FREE", "1"},
+    // Async compute skip & Relocation memory
+    {"FRITCHII_ASYNC_COMPUTE_SKIP", "1"},
+    {"EDEN_NX2_ASYNC_COMPUTE_SKIP", "1"},
+    {"FRITCHII_RELOCATION_MEMORY", "1"},
+    {"EDEN_NX2_RELOCATION_MEMORY", "1"},
+    // Pot room fixes
+    {"FRITCHII_COVERED_RETIRE", "4"},
+    {"EDEN_NX2_COVERED_RETIRE", "4"},
+    {"FRITCHII_COLLECT_LAND_UNDER", "1"},
+    {"EDEN_NX2_COLLECT_LAND_UNDER", "1"},
+    // High refresh uncap & lean report wait (stops thread stalls in towns)
+    {"FRITCHII_REPORT_WAIT", "1"},
+    {"EDEN_NX2_EXP30", "1"},
+    {"FRITCHII_HOSTTIMING_PRIORITY", "1"},
+    {"FRITCHII_LOST_WRITEBACK", "1024"},
+    {"EDEN_NX2_OOT_HIGH_REFRESH", "1"},
+    {"EDEN_NX2_OOT_HIGH_REFRESH_UNLIMITED", "1"},
+#ifdef _WIN32
+    // Windows optimizations
+    {"FRITCHII_GPU_PRIORITY", "2"},
+    {"FRITCHII_ZERO_TRIM_BATCH", "1"},    {"FRITCHII_ZERO_TRIM_CHUNK", "1"},
+    {"FRITCHII_ZERO_UPLOAD", "1"},
+#endif
 };
 
-static void LoadNx2Switches(const char* argv0) {
-    // Later files overwrite earlier entries; the real environment is checked only at the end.
-    std::map<std::string, std::string> entries;
-    for (const auto& [name, value] : BuiltinSwitches) {
-        entries.emplace(name, value);
-    }
-    if (const auto exe_dir = GetSwitchExeDirectory(argv0); !exe_dir.empty()) {
-        ParseSwitchFile(exe_dir / "nx2_switches.txt", entries);
-    }
+static std::string g_switch_summary;
+static std::vector<std::pair<std::string, std::string>> g_switch_groups;
+
+std::string Nx2SwitchSummary() {
+    return g_switch_summary;
+}
+
+std::vector<std::pair<std::string, std::string>> Nx2SwitchGroups() {
+    return g_switch_groups;
+}
+
+static bool IsTestSwitch(std::string_view name) {
+    return name.starts_with("FRITCHII_") || name.starts_with("EDEN_NX2_") ||
+           name.starts_with("LICHII_") || name.starts_with("DEKUBI_");
+}
+
+bool Nx2IsTestSwitch(std::string_view name) {
+    return IsTestSwitch(name);
+}
+
+std::filesystem::path Nx2UserSwitchFile() {
 #ifdef _WIN32
     const auto app_data = Common::FS::GetAppDataRoamingDirectory();
 #else
     const auto app_data = Common::FS::GetDataDirectory("XDG_CONFIG_HOME");
 #endif
-    // Before the first launch's import has copied it, the player's file is still in the old
-    // folder (Dekubi v5.8 moved from eden to dekubi).
-    auto user_file = app_data / EDEN_DIR / "nx2_switches.txt";
-    if (!std::filesystem::exists(user_file)) {
-        user_file = app_data / EDEN_LEGACY_DIR / "nx2_switches.txt";
+    return app_data / EDEN_DIR / "nx2_switches.txt";
+}
+
+std::filesystem::path Nx2LegacyUserSwitchFile() {
+    return Nx2UserSwitchFile().parent_path().parent_path() / EDEN_LEGACY_DIR / "nx2_switches.txt";
+}
+
+static void LoadNx2Switches(const char* argv0) {
+    std::map<std::string, std::string> from_environment;
+#ifdef _WIN32
+    char** const environment = _environ;
+#else
+    char** const environment = environ;
+#endif
+    for (char** it = environment; it != nullptr && *it != nullptr; ++it) {
+        const std::string_view entry{*it};
+        const auto eq = entry.find('=');
+        if (eq != std::string_view::npos && IsTestSwitch(entry.substr(0, eq))) {
+            from_environment.emplace(entry.substr(0, eq), entry.substr(eq + 1));
+        }
     }
-    ParseSwitchFile(user_file, entries);
+
+    std::map<std::string, std::string> entries;
+    std::map<std::string, int> origin;
+    const auto take = [&](std::map<std::string, std::string>&& file, int source) {
+        for (auto& [name, value] : file) {
+            origin.insert_or_assign(name, source);
+            entries.insert_or_assign(name, std::move(value));
+        }
+    };
+    for (const auto& [name, value] : BuiltinSwitches) {
+        entries.emplace(name, value);
+        origin.emplace(name, 3);
+    }
+    for (const auto& [name, value] : DeviceTier::Defaults()) {
+        entries[name] = value;
+        origin[name] = 3;
+    }
+    if (const auto exe_dir = GetSwitchExeDirectory(argv0); !exe_dir.empty()) {
+        std::map<std::string, std::string> file;
+        ParseSwitchFile(exe_dir / "nx2_switches.txt", file);
+        take(std::move(file), 2);
+    }
+    auto user_file = Nx2UserSwitchFile();
+    if (!std::filesystem::exists(user_file)) {
+        user_file = Nx2LegacyUserSwitchFile();
+    }
+    {
+        std::map<std::string, std::string> file;
+        ParseSwitchFile(user_file, file);
+        take(std::move(file), 1);
+    }
+
+    constexpr const char* SourceNames[] = {"environment", "user nx2_switches.txt",
+                                           "nx2_switches.txt next to the exe", "built in"};
+    std::vector<std::string> groups(std::size(SourceNames));
+    const auto add = [&groups](int source, const std::string& name, const std::string& value) {
+        groups[source] += fmt::format("{}{}={}", groups[source].empty() ? "" : ", ", name, value);
+    };
+    for (const auto& [name, value] : from_environment) {
+        add(0, name, value);
+    }
+    for (const auto& [name, value] : entries) {
+        if (!from_environment.contains(name)) {
+            add(origin[name], name, value);
+        }
+    }
+    g_switch_summary.clear();
+    g_switch_groups.clear();
+    for (size_t i = 0; i < groups.size(); ++i) {
+        if (!groups[i].empty()) {
+            g_switch_summary += fmt::format("{}{}: {}", g_switch_summary.empty() ? "" : "; ",
+                                            SourceNames[i], groups[i]);
+            g_switch_groups.emplace_back(SourceNames[i], groups[i]);
+        }
+    }
+
     for (const auto& [name, value] : entries) {
         if (std::getenv(name.c_str()) != nullptr) {
             continue;
@@ -240,6 +371,34 @@ static void LoadNx2Switches(const char* argv0) {
 }
 
 int main(int argc, char* argv[]) {
+#ifdef _WIN32
+    // Single-instance guard: prevent launching a second instance of Dekubi
+    HANDLE single_instance_mutex = nullptr;
+    if (qgetenv("DEKUBI_ALLOW_MULTIPLE_INSTANCES") != "1") {
+        single_instance_mutex = CreateMutexW(nullptr, TRUE, L"Local\\Dekubi_Single_Instance_Mutex");
+        if (single_instance_mutex != nullptr && GetLastError() == ERROR_ALREADY_EXISTS) {
+            CloseHandle(single_instance_mutex);
+            HWND existing_wnd = nullptr;
+            EnumWindows([](HWND hwnd, LPARAM lParam) -> BOOL {
+                wchar_t title[256];
+                if (GetWindowTextW(hwnd, title, 256) > 0) {
+                    if (wcsstr(title, L"Dekubi") != nullptr) {
+                        *reinterpret_cast<HWND*>(lParam) = hwnd;
+                        return FALSE;
+                    }
+                }
+                return TRUE;
+            }, reinterpret_cast<LPARAM>(&existing_wnd));
+            if (existing_wnd) {
+                if (IsIconic(existing_wnd)) {
+                    ShowWindow(existing_wnd, SW_RESTORE);
+                }
+                SetForegroundWindow(existing_wnd);
+            }
+            return 0;
+        }
+    }
+#endif
 #ifdef ENABLE_UPDATE_CHECKER
     // Before the switches are added to the environment, which a restart must not inherit.
     Updater::PrepareLaunch();

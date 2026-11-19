@@ -23,6 +23,7 @@
 #include "common/logging.h"
 #include "common/settings.h"
 #include "common/dkb_cpu_trace.h"
+#include "common/frame_budget.h"
 #include "common/nx2_timeline.h"
 #include "common/thread.h"
 #include "video_core/gpu_logging/gpu_logging.h"
@@ -192,12 +193,15 @@ Scheduler::Scheduler(const Device& device_, StateTracker& state_tracker_)
 }
 
 Scheduler::~Scheduler() {
-    if (trace_query_pool) {
+    if (trace_query_pool || budget_pool) {
         WaitWorker();
         worker_thread.request_stop();
         worker_thread.join();
         if (trace_gpu_tick != 0) {
             master_semaphore->Wait(trace_gpu_tick);
+        }
+        if (budget_last_tick != 0) {
+            master_semaphore->Wait(budget_last_tick);
         }
     }
 }
@@ -401,6 +405,7 @@ void Scheduler::BeginRenderPassImpl(const Framebuffer* framebuffer, VkRenderPass
     }
     const VkFramebuffer framebuffer_handle = framebuffer->Handle();
     const VkExtent2D render_area = framebuffer->RenderArea();
+    ++render_pass_serial;
     state.renderpass = renderpass;
     state.clear_variant = false;
     state.framebuffer = framebuffer_handle;
@@ -683,6 +688,10 @@ void Scheduler::AllocateWorkerCommandBuffer() {
     if (trace_query_pool && !trace_gpu_failed) {
         TraceGpuSubmission();
     }
+    // Performance overlay time rows (common/frame_budget.h); off: one relaxed load.
+    if ((budget_pending != 0 || Common::FrameBudget::Wanted()) && !budget_failed) [[unlikely]] {
+        BudgetGpuSubmission();
+    }
 }
 
 void Scheduler::TraceShader(u64 hash, u32 stage) {
@@ -882,6 +891,120 @@ void Scheduler::TraceGpuSubmission() {
     trace_gpu_recording = true;
 }
 
+void Scheduler::BudgetGpuSubmission() {
+    if (!budget_pool) {
+        const auto physical = device.GetPhysical();
+        budget_timestamp_bits =
+            physical.GetQueueFamilyProperties()[device.GetGraphicsFamily()].timestampValidBits;
+        budget_timestamp_period = physical.GetProperties().limits.timestampPeriod;
+        if (budget_timestamp_bits == 0 || budget_timestamp_bits > 64 ||
+            budget_timestamp_period <= 0) {
+            LOG_INFO(Render_Vulkan, "Overlay GPU time: the graphics queue has no timestamps");
+            budget_failed = true;
+            Common::FrameBudget::SetGpuUnsupported();
+            return;
+        }
+        try {
+            budget_pool = device.GetLogical().CreateQueryPool({
+                .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
+                .pNext = nullptr,
+                .flags = 0,
+                .queryType = VK_QUERY_TYPE_TIMESTAMP,
+                .queryCount = BudgetSlots * 2,
+                .pipelineStatistics = 0,
+            });
+        } catch (const vk::Exception& error) {
+            LOG_WARNING(Render_Vulkan, "Overlay GPU time unavailable: {}", error.what());
+            budget_failed = true;
+            Common::FrameBudget::SetGpuUnsupported();
+            return;
+        }
+    }
+    ReadBudgetResults();
+    if (budget_failed || !Common::FrameBudget::Wanted() || budget_pending == BudgetSlots) {
+        budget_recording = false;
+        return;
+    }
+    // The slot's previous use has been read. Queries can't be reset inside a render pass, so the
+    // reset goes in the upload buffer, which runs first in the same submission.
+    const u32 slot = budget_next_slot % BudgetSlots;
+    current_upload_cmdbuf.ResetQueryPool(*budget_pool, slot * 2, 2);
+    current_upload_cmdbuf.WriteTimestamp(VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, *budget_pool,
+                                         slot * 2);
+    budget_recording = true;
+}
+
+void Scheduler::ReadBudgetResults() {
+    if (budget_pending == 0) {
+        return;
+    }
+    const u32 first = budget_next_slot - budget_pending;
+    const u32 first_slot = first % BudgetSlots;
+    if (!master_semaphore->IsFree(budget_ticks[first_slot])) {
+        master_semaphore->Refresh();
+    }
+    struct Result {
+        u64 timestamp;
+        u64 available;
+    };
+    std::array<Result, 64> results{};
+    // The finished run of pending slots, up to the end of the ring (one query call).
+    const u32 limit = (std::min)({budget_pending, BudgetSlots - first_slot,
+                                  static_cast<u32>(results.size() / 2)});
+    u32 ready = 0;
+    while (ready < limit && master_semaphore->IsFree(budget_ticks[first_slot + ready])) {
+        ++ready;
+    }
+    if (ready == 0) {
+        return;
+    }
+    const VkResult result = device.GetLogical().GetQueryResults(
+        *budget_pool, first_slot * 2, ready * 2, ready * 2 * sizeof(Result), results.data(),
+        sizeof(Result), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
+    if (result != VK_SUCCESS && result != VK_NOT_READY) {
+        LOG_WARNING(Render_Vulkan, "Overlay GPU time off: query result {}",
+                    static_cast<int>(result));
+        budget_failed = true;
+        budget_pending = 0;
+        Common::FrameBudget::SetGpuUnsupported();
+        return;
+    }
+    const u64 mask =
+        budget_timestamp_bits == 64 ? ~u64{0} : (u64{1} << budget_timestamp_bits) - 1;
+    u32 consumed = 0;
+    double busy_ticks = 0;
+    for (; consumed < ready; ++consumed) {
+        const Result& start = results[consumed * 2];
+        const Result& end = results[consumed * 2 + 1];
+        if (start.available == 0 || end.available == 0) {
+            // Done on the timeline but not visible yet: the next submission reads it.
+            break;
+        }
+        const u64 length = (end.timestamp - start.timestamp) & mask;
+        // Submissions run in queue order but may overlap at their edges: count each GPU tick
+        // once (the union of the submissions' spans).
+        u64 counted = length;
+        if (budget_has_end) {
+            const u64 gap = (start.timestamp - budget_last_end) & mask;
+            if (gap > mask / 2) { // started before the previous one ended
+                const u64 overlap = (budget_last_end - start.timestamp) & mask;
+                counted = overlap >= length ? 0 : length - overlap;
+            }
+        }
+        if (!budget_has_end || counted != 0) {
+            budget_last_end = end.timestamp;
+            budget_has_end = true;
+        }
+        busy_ticks += static_cast<double>(counted);
+    }
+    budget_pending -= consumed;
+    const double busy_ns = busy_ticks * static_cast<double>(budget_timestamp_period);
+    // Over a second per submission is a broken reading, not GPU work.
+    if (consumed != 0 && busy_ns < 1e9 * consumed) {
+        Common::FrameBudget::AddGpuBusy(static_cast<u64>(busy_ns));
+    }
+}
+
 u64 Scheduler::SubmitExecution(VkSemaphore signal_semaphore, VkSemaphore wait_semaphore) {
     if (uploads_pending) {
         // Keep the copies in the tick that protects their staging regions and buffer lifetimes.
@@ -922,6 +1045,16 @@ u64 Scheduler::SubmitExecution(VkSemaphore signal_semaphore, VkSemaphore wait_se
         }
         if (trace_query_pool) {
             trace_work = {};
+        }
+        if (budget_recording) {
+            const u32 slot = budget_next_slot % BudgetSlots;
+            cmdbuf.WriteTimestamp(VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, *budget_pool,
+                                  slot * 2 + 1);
+            budget_ticks[slot] = signal_value;
+            budget_last_tick = signal_value;
+            ++budget_next_slot;
+            ++budget_pending;
+            budget_recording = false;
         }
         cmdbuf.End();
 
@@ -997,6 +1130,7 @@ void Scheduler::EndRenderPass()
         ++recording_epoch;
         fragment_barrier.Reset();
         render_pass_has_stores = false;
+        ++render_pass_serial;
 
         query_cache->CounterClose(VideoCommon::QueryType::StreamingByteCount);
 

@@ -3,7 +3,9 @@
 #include <malloc.h>
 #include <malloc.h>
 #include <malloc.h>
+#ifdef _MSC_VER
 #pragma warning(disable: 4456 4457 4458 4459)
+#endif
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
@@ -63,6 +65,7 @@
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/memory_manager.h"
 #include "video_core/nx2_debug_control.h"
+#include "video_core/nx2_fast_draw.h"
 #include "video_core/nx2_perf.h"
 #include "video_core/nx2_precompile.h"
 #include "video_core/pipeline_cache_files.h"
@@ -441,6 +444,10 @@ constexpr size_t MaxTranslationsInFlight = 64;
 constexpr std::chrono::milliseconds TranslateWaitCap{50};
 constexpr u32 MaxTranslateFailures = 2;
 constexpr std::chrono::seconds TranslateSweepAge{5};
+
+/// The EXP67=1 per-frame wait for unbuilt compute pipelines (Lichii's native_pipeline_wait_ms
+/// default).
+constexpr s64 ComputeWaitBudgetUs = 8000;
 
 /// EDEN_NX2_ASYNC_TRANSLATE_THREADS: translation threads (2 by default, 1 to 8).
 size_t TranslateThreads() {
@@ -842,6 +849,7 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
         .max_per_stage_descriptor_sampled_images = device.GetMaxPerStageDescriptorSampledImages(),
         .max_per_stage_resources = device.GetMaxPerStageResources(),
         .max_per_stage_descriptor_storage_buffers = device.GetMaxPerStageDescriptorStorageBuffers(),
+        .max_per_stage_descriptor_samplers = device.GetMaxPerStageDescriptorSamplers(),
         .max_descriptor_set_samplers = device.GetMaxDescriptorSetSamplers(),
         .max_descriptor_set_uniform_buffers = device.GetMaxDescriptorSetUniformBuffers(),
         .max_descriptor_set_uniform_buffers_dynamic = device.GetMaxDescriptorSetUniformBuffersDynamic(),
@@ -863,8 +871,16 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
         .support_conditional_barrier = device.SupportsConditionalBarriers(),
         .single_lane_geometry_subgroups = !profile.SupportsSubgroupStage(Shader::Stage::Geometry),
         .support_byte_addressed_r16 = true,
+        // The arrays are indexed per invocation, which needs nonuniform indexing to be defined.
+        .support_handle_table_arrays = device.IsSampledImageArrayNonUniformIndexingSupported(),
     };
     host_info.ApplyDescriptorLimitPolicy();
+
+    LOG_INFO(Render_Vulkan,
+             "Bindless handle tables: sampled image arrays indexed per invocation {}, up to {} "
+             "sampled images per stage",
+             device.IsSampledImageArrayNonUniformIndexingSupported() ? "supported" : "unsupported",
+             device.GetMaxPerStageDescriptorSampledImages());
 
     if (device.GetMaxVertexInputAttributes() < Maxwell::NumVertexAttributes) {
         LOG_WARNING(Render_Vulkan, "maxVertexInputAttributes is too low: {} < {}",
@@ -919,6 +935,11 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
         Settings::values.vertex_input_dynamic_state.GetValue();
     dynamic_features.has_static_vertex_repack =
         StaticVertexRepackEnabled(device.GetMinVertexInputBindingStrideAlignment());
+    VideoCommon::Nx2FastDraw::g_dynamic_vertex_input.store(
+        dynamic_features.has_dynamic_vertex_input, std::memory_order_relaxed);
+    VideoCommon::Nx2FastDraw::g_dynamic_strides.store(
+        dynamic_features.has_dynamic_vertex_input && dynamic_features.has_extended_dynamic_state,
+        std::memory_order_relaxed);
 
     dynamic_features.has_provoking_vertex = device.IsExtProvokingVertexSupported();
     dynamic_features.has_provoking_vertex_first_mode =
@@ -2509,7 +2530,26 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipelineClean(bool patch) {
         }
     } else {
         TakeCleanSnapshot();
-        RefreshGraphicsKey();
+        const bool mesh_draw =
+        maxwell3d->GetNativeMacroEngine().native_turing && maxwell3d->regs.IsMeshEnabled();
+    if (vertex_input_lent && !mesh_draw) {
+        // Refresh keeps the key's vertex input until the registers change it.
+        vertex_input_lent = false;
+        maxwell3d->dirty.flags[Dirty::VertexInput] = true;
+    }
+    RefreshGraphicsKey();
+    if (mesh_draw) {
+        // Before the transitions, which hold the lender's key
+        if (!mesh_vertex_inputs_seeded) {
+            mesh_vertex_inputs_seeded = true;
+            for (const auto& [key, pipeline] : graphics_cache) {
+                if (CanSeedMeshVertexInput(pipeline.get())) {
+                    mesh_vertex_inputs.Add(key);
+                }
+            }
+        }
+        vertex_input_lent |= mesh_vertex_inputs.Lend(graphics_key);
+    }
     }
     if (current_pipeline) {
         GraphicsPipeline* const next{current_pipeline->Next(graphics_key)};
@@ -2563,7 +2603,26 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipeline() {
         current_pipeline = nullptr;
         return nullptr;
     }
+    const bool mesh_draw =
+        maxwell3d->GetNativeMacroEngine().native_turing && maxwell3d->regs.IsMeshEnabled();
+    if (vertex_input_lent && !mesh_draw) {
+        // Refresh keeps the key's vertex input until the registers change it.
+        vertex_input_lent = false;
+        maxwell3d->dirty.flags[Dirty::VertexInput] = true;
+    }
     RefreshGraphicsKey();
+    if (mesh_draw) {
+        // Before the transitions, which hold the lender's key
+        if (!mesh_vertex_inputs_seeded) {
+            mesh_vertex_inputs_seeded = true;
+            for (const auto& [key, pipeline] : graphics_cache) {
+                if (CanSeedMeshVertexInput(pipeline.get())) {
+                    mesh_vertex_inputs.Add(key);
+                }
+            }
+        }
+        vertex_input_lent |= mesh_vertex_inputs.Lend(graphics_key);
+    }
 
     if (current_pipeline) {
         GraphicsPipeline* const next{current_pipeline->Next(graphics_key)};
@@ -5805,6 +5864,7 @@ void ReportTranslateProfile() {
 
 void PipelineCache::TickFrame() {
     ++frame_count;
+    compute_wait_budget_us = ComputeWaitBudgetUs;
     ReportWorstFrame();
     ReportAsyncDiscard();
     ReportTranslateProfile();
@@ -6073,6 +6133,52 @@ GraphicsPipeline* PipelineCache::BuiltPipeline(GraphicsPipeline* pipeline) const
     return discard ? nullptr : pipeline;
 }
 
+bool PipelineCache::SkipUnbuiltDispatch(ComputePipeline& pipeline, bool outputs_hold_gpu_data) {
+    // EXP67 (zortos293/Lichii#2104): 1 = wait up to 8 ms per frame in all, then skip; 2 = skip at
+    // once; 0 = wait as before. Only dispatches whose outputs hold earlier GPU results skip.
+    const int mode = VideoCore::Nx2Debug::Experiment(67);
+    if (!use_asynchronous_shaders || mode == 0 || AsyncDiscardMode() == 0) {
+        return false;
+    }
+    if (!outputs_hold_gpu_data) {
+        if (pipeline.FirstWaitForBuild()) {
+            LOG_INFO(Render_Vulkan,
+                     "Compute pipeline {:016x} is still building: its dispatch waits, its outputs "
+                     "hold no earlier shader results",
+                     pipeline.ShaderHash());
+        }
+        return false;
+    }
+    if (mode == 1 && compute_wait_budget_us > 0) {
+        const auto begin = std::chrono::steady_clock::now();
+        const bool built = pipeline.WaitBuilt(std::chrono::microseconds{compute_wait_budget_us});
+        const s64 spent = std::chrono::duration_cast<std::chrono::microseconds>(
+                              std::chrono::steady_clock::now() - begin)
+                              .count();
+        compute_wait_budget_us -= spent;
+        compute_wait_used_us += spent;
+        static auto window = std::chrono::steady_clock::now();
+        if (std::chrono::steady_clock::now() - window > std::chrono::seconds{10}) {
+            LOG_INFO(Render_Vulkan,
+                     "Bounded compute wait: {:.1f} ms spent in the last 10 s (budget {} ms per "
+                     "frame)",
+                     static_cast<double>(compute_wait_used_us) / 1000.0,
+                     ComputeWaitBudgetUs / 1000);
+            compute_wait_used_us = 0;
+            window = std::chrono::steady_clock::now();
+        }
+        if (built) {
+            return false;
+        }
+    }
+    static std::atomic<u64> skipped{};
+    if ((skipped.fetch_add(1, std::memory_order_relaxed) & 255) == 0) {
+        LOG_INFO(Render_Vulkan, "Async shaders: {} compute dispatches skipped for unbuilt pipelines",
+                 skipped.load(std::memory_order_relaxed));
+    }
+    return true;
+}
+
 int AsyncDiscardMode() {
     // Read on first use (the first missing pipeline), after nx2_switches.txt was applied.
     static const int mode = [] {
@@ -6093,6 +6199,43 @@ int AsyncDiscardMode() {
     }();
     return mode;
 }
+
+namespace {
+/// EDEN_NX2_ASYNC_DISCARD=2 also skips depth-tested colour draws into targets the game draws
+/// every frame without clearing them (a scene the sky covers instead of a clear), not only into
+/// cleared ones: those waited for every new pipeline, a stall per new object or effect (Ocarina of
+/// Time in Hyrule Field, the first hit on an enemy). EDEN_NX2_ASYNC_REDRAWN=0 waits for them again.
+bool RedrawnTargetsRecur() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_ASYNC_REDRAWN");
+        const bool on = value == nullptr || value[0] != '0';
+        LOG_INFO(Render_Vulkan, "EDEN_NX2_ASYNC_REDRAWN={}: depth-tested draws into targets drawn "
+                                "every frame without a clear {}",
+                 on ? 1 : 0, on ? "skip unbuilt pipelines" : "wait for them");
+        return on;
+    }();
+    return enabled;
+}
+
+/// Depth test on (a bound depth buffer alone doesn't test) and at least one colour target
+/// written: a depth-only pass, or a draw without depth testing (UI, a layer drawn once), waits.
+bool IsDepthTestedColorDraw(const Maxwell& regs) noexcept {
+    if (regs.zeta_enable == 0 || regs.depth_test_enable == 0) {
+        return false;
+    }
+    const u32 count =
+        (std::min)(static_cast<u32>(regs.rt_control.count), static_cast<u32>(Maxwell::NumRenderTargets));
+    for (u32 i = 0; i < count; ++i) {
+        const u32 rt_index = regs.rt_control.Map(i);
+        if (rt_index < Maxwell::NumRenderTargets &&
+            regs.rt[rt_index].format != Tegra::RenderTargetFormat::NONE &&
+            regs.color_mask[regs.color_mask_common ? 0 : rt_index].raw != 0) {
+            return true;
+        }
+    }
+    return false;
+}
+} // Anonymous namespace
 
 bool PipelineCache::DrawMayBeSkipped() const {
     // Native draws whose pipeline is still building are skipped instead of waited for (the
@@ -6119,7 +6262,9 @@ bool PipelineCache::DrawMayBeSkipped() const {
     // rule drops for good); it runs per missing pipeline, not per draw.
     const VideoCommon::DrawTargets targets = texture_cache.ClassifyDrawTargets();
     const bool recurring =
-        mode != 2 || !native || targets.kind == VideoCommon::DrawTargetClass::Recurring;
+        mode != 2 || !native || targets.kind == VideoCommon::DrawTargetClass::Recurring ||
+        (RedrawnTargetsRecur() && IsDepthTestedColorDraw(maxwell3d->regs) &&
+         targets.kind_if_redrawn == VideoCommon::DrawTargetClass::Recurring);
     const bool skip = CanDiscardPendingDraw(native, maxwell3d->regs.zeta_enable != 0,
                                             draw_state.draw_element_count,
                                             draw_state.draw_element_count, mode != 0, recurring);
@@ -6297,6 +6442,9 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
             auto& program_va{programs[0]};
             auto program_vb{TranslateProgram(pools.inst, pools.block, env, cfg, host_info)};
             programs[index] = MergeDualVertexPrograms(program_va, program_vb, env, host_info);
+            // Each half fit its texture arrays to the stage limits on its own; joined, they are
+            // one stage.
+            Shader::Optimization::LimitSampledTextureArrays(programs[index], host_info);
         }
         if (t_runtime_build) {
             t_build_split.translation += std::chrono::steady_clock::now() - translate_begin;
@@ -6342,6 +6490,22 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
             }
         }
     }
+    {
+        // Fit the set before mesh fallback chooses its auxiliary buffer bindings: cutting arrays
+        // can merge descriptors, so both their element counts and their binding counts can change.
+        std::array<Shader::IR::Program*, Maxwell::MaxShaderProgram> stages{};
+        size_t num_stages{};
+        for (size_t index = uses_vertex_a && uses_vertex_b ? 1 : 0;
+             index < Maxwell::MaxShaderProgram; ++index) {
+            const bool is_emulated_stage = layer_source_program != nullptr &&
+                                           index == static_cast<u32>(Maxwell::ShaderType::Geometry);
+            if (key.unique_hashes[index] != 0 || is_emulated_stage) {
+                stages[num_stages++] = &programs[index];
+            }
+        }
+        Shader::Optimization::LimitPipelineSampledTextureArrays(
+            std::span{stages.data(), num_stages}, host_info);
+    }
     // Mesh emulation without VK_EXT_mesh_shader (prototype): a mesh program, after an optional
     // task program, drawing triangles without per-primitive outputs, before a pixel program only.
     std::optional<MeshEmulationSetup> mesh_emulation;
@@ -6370,13 +6534,17 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
         if (!eligible) {
             return nullptr;
         }
-        // The output buffer's binding follows every program's (unified bindings, one per
-        // descriptor element, as the SPIR-V backend numbers them). The task and mesh programs
-        // share the compute stage, so their descriptors and the emulation's own buffers count
-        // against one set of per-stage limits.
+        // Task and mesh share the compute stage, including the fallback's storage buffers.
+        // Shrink their arrays before counting resources and assigning auxiliary bindings.
+        std::array<Shader::IR::Program*, 2> compute_programs{&programs[mesh_index], &programs[1]};
+        Shader::Optimization::LimitSharedStageSampledTextureArrays(
+            std::span{compute_programs.data(), has_task ? size_t{2} : size_t{1}}, host_info,
+            has_task ? 4U : 1U);
+        // Descriptor arrays occupy one binding, just as in DefineTextures and the layout builder.
         u32 output_binding{};
         u32 compute_storage_buffers{has_task ? 4U : 1U};
         u32 compute_sampled_images{};
+        u32 compute_samplers{};
         u32 compute_resources{compute_storage_buffers};
         for (size_t index = 1; index < Maxwell::MaxShaderProgram; ++index) {
             if (key.unique_hashes[index] == 0) {
@@ -6386,7 +6554,7 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
             const bool emulated{index == mesh_index || (has_task && index == 1)};
             const auto add = [&](const auto& descriptors, u32* category) {
                 const u32 count{Shader::NumDescriptors(descriptors)};
-                output_binding += count;
+                output_binding += static_cast<u32>(descriptors.size());
                 if (emulated) {
                     compute_resources += count;
                     if (category) {
@@ -6400,14 +6568,20 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
             add(info.image_buffer_descriptors, nullptr);
             add(info.texture_descriptors, &compute_sampled_images);
             add(info.image_descriptors, nullptr);
+            if (emulated) {
+                compute_samplers += Shader::NumDescriptors(info.texture_descriptors);
+            }
         }
         if (compute_storage_buffers > device.GetMaxPerStageDescriptorStorageBuffers() ||
             compute_sampled_images > device.GetMaxPerStageDescriptorSampledImages() ||
+            compute_samplers > device.GetMaxPerStageDescriptorSamplers() ||
             compute_resources > device.GetMaxPerStageResources()) {
-            LOG_WARNING(Render_Vulkan,
-                        "Mesh emulation skipped: {} storage buffers, {} sampled images and {} "
-                        "resources exceed the compute stage limits",
-                        compute_storage_buffers, compute_sampled_images, compute_resources);
+            LOG_WARNING(
+                Render_Vulkan,
+                "Mesh emulation skipped: {} storage buffers, {} sampled images, {} samplers "
+                "and {} resources exceed the compute stage limits",
+                compute_storage_buffers, compute_sampled_images, compute_samplers,
+                compute_resources);
             return nullptr;
         }
         mesh_emulation.emplace();

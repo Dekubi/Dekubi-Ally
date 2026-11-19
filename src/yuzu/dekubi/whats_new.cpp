@@ -101,11 +101,6 @@ bool ShouldShowWhatsNew(bool used_before) {
     if (seen == version) {
         return false;
     }
-    if (seen.empty() && !used_before) {
-        // A first install: nothing is new to this player.
-        MarkWhatsNewSeen();
-        return false;
-    }
     return !BundledNotes().isEmpty();
 }
 

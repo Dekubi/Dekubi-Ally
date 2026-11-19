@@ -35,6 +35,7 @@
 #include "video_core/memory_manager.h"
 #include "video_core/nx2.h"
 #include "video_core/nx2_qmd_prediction.h"
+#include "video_core/nx2_fast_draw.h"
 #include "video_core/rasterizer_interface.h"
 
 namespace Tegra::Engines {
@@ -63,7 +64,8 @@ u32 ReadSemaphoreWord(DmaPusher& dma_pusher, GPUVAddr address) {
 template <typename Func>
 void OnBack(const Func& func) {
     if (auto& split = VideoCommon::GpuSplit::Get(); split.Active()) {
-        split.Defer(func);
+        split.Defer(func, VideoCommon::GpuSplit::Effect::Unknown,
+                    VideoCommon::GpuSplit::CallTag(VideoCommon::Nx2FastDraw::CallSite::PullerOnBack));
         split.NoteMemoryWrite();
     } else {
         func();
@@ -431,21 +433,21 @@ private:
     std::chrono::steady_clock::time_point last_report = std::chrono::steady_clock::now();
 };
 
-// EDEN_NX2_ACQUIRE_EQUAL=1: an equal acquire whose word holds the value continues without a
-// drain, unless a release of another payload to the word is still queued. NVN2's queue-sync slots
-// get one release per frame number, so the word changes again only after the acquiring queue
-// moved on. Ocarina drained ~30 ms/s on such acquires that were met before the drain.
+// EDEN_NX2_ACQUIRE_EQUAL=1: an equal or mask acquire whose word holds or settles to the value
+// continues without a drain, unless a release of another payload to the word is still queued.
+// NVN2's queue-sync slots get one release per frame number, so the word changes again only after
+// the acquiring queue moved on. Ocarina drained ~30 ms/s on such acquires that were met before the drain.
 bool EqualMetWithoutDrain(DmaPusher& dma_pusher, GPUVAddr address, u32 value) {
     static const bool enabled = [] {
         const char* setting = std::getenv("EDEN_NX2_ACQUIRE_EQUAL");
-        return setting != nullptr && setting[0] == '1';
+        return setting == nullptr || setting[0] != '0';
     }();
     auto& split = VideoCommon::GpuSplit::Get();
     if (!enabled || !split.Active()) {
         return false;
     }
     auto& memory = dma_pusher.memory_manager;
-    if (memory.OverlapsNativeSyncpointShim(address, sizeof(u32)) || memory.Read<u32>(address) != value) {
+    if (memory.OverlapsNativeSyncpointShim(address, sizeof(u32))) {
         return false;
     }
     const auto device = memory.GpuToCpuAddress(address);
@@ -453,8 +455,46 @@ bool EqualMetWithoutDrain(DmaPusher& dma_pusher, GPUVAddr address, u32 value) {
         return false;
     }
     u32 miss = 0;
-    if (const auto payload = split.QueuedReleasePayload(*device, address, &miss);
-        (payload && *payload != value) || miss == 3) {
+    const auto payload = split.QueuedReleasePayload(*device, address, &miss);
+    const u32 settled_val = payload ? *payload : memory.Read<u32>(address);
+    if (settled_val != value) {
+        return false;
+    }
+    if (miss == 3) {
+        return false;
+    }
+    if (u32 method = 0; split.QueuedWriterKind(address, address + sizeof(u32), method) == 4) {
+        return false; // An upload to the word is queued
+    }
+    split.NoteSync();
+    VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::AcquiresFast, 1);
+    return true;
+}
+
+bool MaskMetWithoutDrain(DmaPusher& dma_pusher, GPUVAddr address, u32 mask) {
+    static const bool enabled = [] {
+        const char* setting = std::getenv("EDEN_NX2_ACQUIRE_EQUAL");
+        return setting == nullptr || setting[0] != '0';
+    }();
+    auto& split = VideoCommon::GpuSplit::Get();
+    if (!enabled || !split.Active()) {
+        return false;
+    }
+    auto& memory = dma_pusher.memory_manager;
+    if (memory.OverlapsNativeSyncpointShim(address, sizeof(u32))) {
+        return false;
+    }
+    const auto device = memory.GpuToCpuAddress(address);
+    if (!device) {
+        return false;
+    }
+    u32 miss = 0;
+    const auto payload = split.QueuedReleasePayload(*device, address, &miss);
+    const u32 settled_val = payload ? *payload : memory.Read<u32>(address);
+    if ((settled_val & mask) == 0) {
+        return false;
+    }
+    if (miss == 3) {
         return false;
     }
     if (u32 method = 0; split.QueuedWriterKind(address, address + sizeof(u32), method) == 4) {
@@ -827,7 +867,9 @@ static bool ReleaseFencesForReadable(DmaPusher& dma_pusher, const void* owner,
         return result;
     }
     const u64 target = split.UntrackedWriterPosition(*device);
-    split.Defer([rasterizer = dma_pusher.rasterizer] { rasterizer->ReleaseFences(); });
+    split.Defer([rasterizer = dma_pusher.rasterizer] { rasterizer->ReleaseFences(); },
+                VideoCommon::GpuSplit::Effect::Unknown,
+                VideoCommon::GpuSplit::CallTag(VideoCommon::Nx2FastDraw::CallSite::ReleaseFences));
     split.NoteMemoryWrite();
     const auto begin = Clock::now();
     if (split.WaitUntil(target, VideoCommon::DrainSite::FenceWriters)) {
@@ -837,7 +879,7 @@ static bool ReleaseFencesForReadable(DmaPusher& dma_pusher, const void* owner,
     stats.wait_ns += FenceWriterStats::Nanoseconds(begin, reached);
     const bool met_there = met();
     stats.met += met_there ? 1 : 0;
-    if (mode == 3 || (mode == 1 && !met_there)) {
+    if (!met_there) {
         split.Drain(VideoCommon::DrainSite::FenceRelease);
         const u64 ns = FenceWriterStats::Nanoseconds(reached, Clock::now());
         const bool result = met();
@@ -1157,6 +1199,10 @@ void Puller::ProcessSemaphoreTriggerMethod(DmaPusher& dma_pusher) {
             EqualMetWithoutDrain(dma_pusher, acquire.address, acquire.value)) {
             return;
         }
+        if (op == GpuSemaphoreOperation::AcquireMask &&
+            MaskMetWithoutDrain(dma_pusher, acquire.address, acquire.value)) {
+            return;
+        }
         const bool trace = AcquireTrace::Enabled();
         const u32 word_before = trace ? dma_pusher.memory_manager.Read<u32>(acquire.address) : 0;
         u32 writer_method = 0;
@@ -1303,6 +1349,8 @@ void Puller::ProcessSemaphoreRelease(DmaPusher& dma_pusher) {
 
 void Puller::ProcessSemaphoreAcquire(DmaPusher& dma_pusher) {
     DrainBack();
+    // The CPU may rewrite what the next draws read once it sees the release this waits for.
+    VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::Fence);
     u32 word = dma_pusher.memory_manager.Read<u32>(regs.semaphore_address.SemaphoreAddress());
     const auto value = regs.semaphore_acquire;
     while (word != value) {
@@ -1353,6 +1401,7 @@ void Puller::ProcessSemaphoreExecute(DmaPusher& dma_pusher, u32 argument) {
         return;
     }
     DrainBack();
+    VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::Fence);
     ReleaseFences(dma_pusher);
     const u32 word = dma_pusher.memory_manager.Read<u32>(address);
     const bool ready = operation == 0   ? word == payload

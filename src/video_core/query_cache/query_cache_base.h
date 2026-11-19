@@ -167,28 +167,56 @@ protected:
             }
             auto& contents = it->second;
             bool matched = false;
-            for (auto& query : contents) {
-                if (!in_range(query.first)) {
-                    continue;
-                }
-                matched = true;
-                if constexpr (RETURNS_BOOL) {
-                    if (func(query.second)) {
-                        return;
+            const bool probe_direct = contents.size() > 8 && size <= 64;
+            if (probe_direct) {
+                const u32 min_loc = (addr_begin > page_start + 3)
+                                        ? static_cast<u32>((addr_begin - page_start - 3) & ~3ULL)
+                                        : 0;
+                const u32 max_loc =
+                    static_cast<u32>(std::min<u64>(Core::DEVICE_PAGESIZE, addr_end - page_start));
+                for (u32 loc = min_loc; loc < max_loc; loc += 4) {
+                    auto qit = contents.find(loc);
+                    if (qit != contents.end()) {
+                        if (!in_range(qit->first)) {
+                            continue;
+                        }
+                        matched = true;
+                        if constexpr (RETURNS_BOOL) {
+                            if (func(qit->second)) {
+                                return;
+                            }
+                        } else {
+                            func(qit->second);
+                        }
+                        if constexpr (remove_from_cache) {
+                            contents.erase(qit);
+                        }
                     }
-                } else {
-                    func(query.second);
                 }
-            }
-            // Only pages with a query in the range: the scan above already found none elsewhere.
-            if constexpr (remove_from_cache) {
-                if (!matched) {
-                    continue;
+            } else {
+                for (auto& query : contents) {
+                    if (!in_range(query.first)) {
+                        continue;
+                    }
+                    matched = true;
+                    if constexpr (RETURNS_BOOL) {
+                        if (func(query.second)) {
+                            return;
+                        }
+                    } else {
+                        func(query.second);
+                    }
                 }
-                const auto in_range2 = [&](const std::pair<u32, QueryLocation>& pair) {
-                    return in_range(pair.first);
-                };
-                erase_if(contents, in_range2);
+                // Only pages with a query in the range: the scan above already found none elsewhere.
+                if constexpr (remove_from_cache) {
+                    if (!matched) {
+                        continue;
+                    }
+                    const auto in_range2 = [&](const std::pair<u32, QueryLocation>& pair) {
+                        return in_range(pair.first);
+                    };
+                    erase_if(contents, in_range2);
+                }
             }
         }
     }

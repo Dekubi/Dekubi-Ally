@@ -368,7 +368,7 @@ struct Values {
                                                   true};
 
     SwitchableSetting<ScalingFilter> scaling_filter{linkage,
-                                                    ScalingFilter::ScaleForce,
+                                                    ScalingFilter::Auto,
                                                     "scaling_filter",
                                                     Category::Renderer,
                                                     Specialization::Default,
@@ -396,6 +396,14 @@ struct Values {
     // value (left in some players' OoT configs) silently overrode the checkbox, which then showed
     // unchecked and greyed once the game ran (2026-11-09, an RTX 5080 player).
     Setting<bool> nvidia_dlss{linkage, false, "nvidia_dlss", Category::Renderer};
+    // The DLSS model version or source: "auto" by default, or specific model IDs like "DLSS 5", "DLSS 4", etc.
+    SwitchableSetting<std::string> nvidia_dlss_version{linkage,
+                                                       "auto",
+                                                       "nvidia_dlss_version",
+                                                       Category::Renderer,
+                                                       Specialization::Default,
+                                                       true,
+                                                       true};
     // The DLSS model (preset) for every mode: K by default (NVIDIA's defaults for Performance and
     // Ultra Performance drew thin lines); Default leaves the choice to NVIDIA. EDEN_NX2_DLSS_PRESET
     // still overrides it. Applies live (Apply/OK while playing).
@@ -704,7 +712,7 @@ struct Values {
                                              Category::RendererAdvanced,
                                              Specialization::Paired};
     SwitchableSetting<OotRefreshCap> oot_high_refresh_cap{linkage,
-                                                          OotRefreshCap::Display,
+                                                          OotRefreshCap::Unlimited,
                                                           "oot_high_refresh_cap",
                                                           Category::RendererAdvanced,
                                                           Specialization::Default,
@@ -1099,6 +1107,7 @@ constexpr u32 MAX_FRAME_GEN_MULTIPLIER = 4;
 /// game runs (Ctrl+U, FileSys::SwitchOotHighRefreshLive) sets it too.
 void SetOotHighRefreshPatched(bool patched);
 [[nodiscard]] bool OotHighRefreshPatched();
+[[nodiscard]] bool OcarinaMaxResolutionOn();
 
 [[nodiscard]] size_t FrameGenGenerations();
 

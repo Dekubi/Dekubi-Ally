@@ -15,6 +15,7 @@
 #include <iostream>
 #include <set>
 #include <span>
+#include <mutex>
 #include <unordered_set>
 #include <unordered_map>
 
@@ -39,11 +40,13 @@
 #include "video_core/shader_handle_program.h"
 #include "video_core/shader_notify.h"
 #include "video_core/texture_cache/texture_cache.h"
+#include "video_core/texture_cache/formatter.h"
 #include "video_core/vulkan_common/vulkan_device.h"
 #include "video_core/gpu_logging/gpu_logging.h"
 #include "video_core/nx2_debug_control.h"
 #include "common/settings.h"
 #include "shader_recompiler/exception.h"
+#include "video_core/nx2_fast_draw.h"
 #include "video_core/nx2_profile.h"
 
 #if defined(__clang__) && defined(NDEBUG)
@@ -464,6 +467,297 @@ ConfigureFuncPtr ConfigureFunc(const std::array<bool, NUM_STAGES>& stages,
 
 std::atomic<std::chrono::nanoseconds::rep> hold_time_ns{};
 std::atomic<std::chrono::nanoseconds::rep> hold_time_total_ns{};
+
+/// EDEN_NX2_CLAIM_HELD_BUILDS (default 1): a draw held for a worker-emitted (native) pipeline
+/// whose build no worker has started yet runs that build itself instead of waiting for the
+/// FIFO pool to reach it. The VulkanWorker waits for that build either way; claiming only cuts
+/// the queue time in front of it (bursts of 100+ new pipelines kept every worker busy for
+/// seconds while held draws waited at the back). A running build is still waited for. The
+/// emission is thread-agnostic (async-native-pipelines.md: it owns its IR pools and reads no
+/// engine state), and teardown already claims queued builds the same way. 0: never claim.
+bool HeldDrawsClaimBuilds() {
+    static const bool enabled = [] {
+        const char* const value = std::getenv("EDEN_NX2_CLAIM_HELD_BUILDS");
+        return value == nullptr || value[0] != '0';
+    }();
+    return enabled;
+}
+
+/// EDEN_NX2_WAIT_LIMIT_MS (default 16; 0 = wait as before): a draw into a depth/shadow/probe
+/// target, or into a target already drawn this session, skips after the cap and retries next
+/// frame. First-time color/UI still waits, so a one-shot menu or title draw is not dropped.
+int WaitLimitMs() {
+    static const int value = [] {
+        const char* const text = std::getenv("EDEN_NX2_WAIT_LIMIT_MS");
+        if (text == nullptr || text[0] == '\0') {
+            return 16;
+        }
+        char* end{};
+        const long parsed = std::strtol(text, &end, 10);
+        if (end == text || parsed < 0 || parsed > 10000) {
+            return 16;
+        }
+        return static_cast<int>(parsed);
+    }();
+    return value;
+}
+
+enum class WaitLimitReason : u8 { None, DepthShadow, Probe, AlreadyDrawn };
+
+const char* WaitLimitReasonName(WaitLimitReason reason) {
+    switch (reason) {
+    case WaitLimitReason::DepthShadow:
+        return "depth/shadow";
+    case WaitLimitReason::Probe:
+        return "probe";
+    case WaitLimitReason::AlreadyDrawn:
+        return "already-drawn";
+    default:
+        return "none";
+    }
+}
+
+const char* DrawTargetKindName(VideoCommon::DrawTargetClass kind) {
+    switch (kind) {
+    case VideoCommon::DrawTargetClass::Recurring:
+        return "recurring";
+    case VideoCommon::DrawTargetClass::FirstTime:
+        return "first-time";
+    case VideoCommon::DrawTargetClass::Persistent:
+        return "persistent";
+    }
+    return "unknown";
+}
+
+bool IsDepthOrStencilFormat(VideoCore::Surface::PixelFormat format) {
+    switch (VideoCore::Surface::GetFormatType(format)) {
+    case VideoCore::Surface::SurfaceType::Depth:
+    case VideoCore::Surface::SurfaceType::Stencil:
+    case VideoCore::Surface::SurfaceType::DepthStencil:
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool IsLightingProbe(const VideoCommon::DrawTargets& targets) {
+    if (targets.gpu_addr == 0 || IsDepthOrStencilFormat(targets.format)) {
+        return false;
+    }
+    if (std::max(targets.width, targets.height) > 512) {
+        return false;
+    }
+    switch (targets.format) {
+    case VideoCore::Surface::PixelFormat::R16G16B16A16_FLOAT:
+    case VideoCore::Surface::PixelFormat::B10G11R11_FLOAT:
+    case VideoCore::Surface::PixelFormat::R32G32B32A32_FLOAT:
+    case VideoCore::Surface::PixelFormat::R32G32_FLOAT:
+    case VideoCore::Surface::PixelFormat::R32_FLOAT:
+    case VideoCore::Surface::PixelFormat::R16_FLOAT:
+    case VideoCore::Surface::PixelFormat::R16G16_FLOAT:
+    case VideoCore::Surface::PixelFormat::R16G16B16X16_FLOAT:
+    case VideoCore::Surface::PixelFormat::R32G32B32_FLOAT:
+    case VideoCore::Surface::PixelFormat::E5B9G9R9_FLOAT:
+        return true;
+    default:
+        return false;
+    }
+}
+
+struct WaitLimitStats {
+    std::mutex mutex;
+    std::unordered_set<GPUVAddr> drawn;
+    u64 skip_first_time{};
+    u64 skip_persistent{};
+    u64 skip_recurring{};
+    u64 skip_depth{};
+    u64 skip_probe{};
+    u64 skip_already{};
+    u64 finished_in_cap{};
+    u64 boosted{};
+    std::chrono::steady_clock::time_point window{};
+    bool logged_mode{};
+};
+
+WaitLimitStats wait_limit_stats;
+
+void NoteDrawnTarget(const VideoCommon::DrawTargets& targets) {
+    if (targets.gpu_addr == 0) {
+        return;
+    }
+    std::scoped_lock lock{wait_limit_stats.mutex};
+    wait_limit_stats.drawn.insert(targets.gpu_addr);
+}
+
+bool TargetDrawnThisSession(GPUVAddr gpu_addr) {
+    if (gpu_addr == 0) {
+        return false;
+    }
+    std::scoped_lock lock{wait_limit_stats.mutex};
+    return wait_limit_stats.drawn.contains(gpu_addr);
+}
+
+WaitLimitReason WaitLimitReasonFor(const VideoCommon::DrawTargets& targets) {
+    if (WaitLimitMs() <= 0) {
+        return WaitLimitReason::None;
+    }
+    if (IsDepthOrStencilFormat(targets.format)) {
+        return WaitLimitReason::DepthShadow;
+    }
+    if (IsLightingProbe(targets)) {
+        return WaitLimitReason::Probe;
+    }
+    if (TargetDrawnThisSession(targets.gpu_addr)) {
+        return WaitLimitReason::AlreadyDrawn;
+    }
+    return WaitLimitReason::None;
+}
+
+void ReportWaitLimitLocked(WaitLimitStats& stats, std::chrono::steady_clock::time_point now) {
+    if (stats.skip_first_time + stats.skip_persistent + stats.skip_recurring +
+            stats.finished_in_cap + stats.boosted ==
+        0) {
+        stats.window = now;
+        return;
+    }
+    LOG_INFO(Render_Vulkan,
+             "WaitLimit in the last 10 s: skipped {} draws ({} first-time, {} persistent, "
+             "{} recurring; {} depth/shadow, {} probe, {} already-drawn); {} waits finished in "
+             "the cap; boosted {} in-flight builders; cap {} ms",
+             stats.skip_first_time + stats.skip_persistent + stats.skip_recurring,
+             stats.skip_first_time, stats.skip_persistent, stats.skip_recurring, stats.skip_depth,
+             stats.skip_probe, stats.skip_already, stats.finished_in_cap, stats.boosted,
+             WaitLimitMs());
+    stats.skip_first_time = 0;
+    stats.skip_persistent = 0;
+    stats.skip_recurring = 0;
+    stats.skip_depth = 0;
+    stats.skip_probe = 0;
+    stats.skip_already = 0;
+    stats.finished_in_cap = 0;
+    stats.boosted = 0;
+    stats.window = now;
+}
+
+void MaybeReportWaitLimit() {
+    auto& stats = wait_limit_stats;
+    std::scoped_lock lock{stats.mutex};
+    const auto now = std::chrono::steady_clock::now();
+    if (stats.window == std::chrono::steady_clock::time_point{}) {
+        stats.window = now;
+        return;
+    }
+    if (now - stats.window >= std::chrono::seconds{10}) {
+        ReportWaitLimitLocked(stats, now);
+    }
+}
+
+void NoteWaitLimitSkip(const VideoCommon::DrawTargets& targets, WaitLimitReason reason,
+                       std::chrono::nanoseconds held, int limit_ms) {
+    auto& stats = wait_limit_stats;
+    std::scoped_lock lock{stats.mutex};
+    switch (targets.kind) {
+    case VideoCommon::DrawTargetClass::FirstTime:
+        ++stats.skip_first_time;
+        break;
+    case VideoCommon::DrawTargetClass::Persistent:
+        ++stats.skip_persistent;
+        break;
+    case VideoCommon::DrawTargetClass::Recurring:
+        ++stats.skip_recurring;
+        break;
+    }
+    switch (reason) {
+    case WaitLimitReason::DepthShadow:
+        ++stats.skip_depth;
+        break;
+    case WaitLimitReason::Probe:
+        ++stats.skip_probe;
+        break;
+    case WaitLimitReason::AlreadyDrawn:
+        ++stats.skip_already;
+        break;
+    default:
+        break;
+    }
+    LOG_INFO(Render_Vulkan,
+             "WaitLimit: skip {} {}x{} {} {:#x} after {:.1f} ms ({}{}; EDEN_NX2_WAIT_LIMIT_MS={})",
+             DrawTargetKindName(targets.kind), targets.width, targets.height, targets.format,
+             targets.gpu_addr, std::chrono::duration<double, std::milli>(held).count(),
+             WaitLimitReasonName(reason),
+             stats.drawn.contains(targets.gpu_addr) ? ", seen before" : "", limit_ms);
+}
+
+
+/// Returns false if this draw should be skipped (retry next frame). Records hold time either way.
+bool HoldForPipelineBuild(PipelineBuild& build, Scheduler& scheduler,
+                          GraphicsPipelineLibraryCache* library_cache, TextureCache& texture_cache,
+                          bool worker_only_build) {
+    auto& stats = wait_limit_stats;
+    {
+        std::scoped_lock lock{stats.mutex};
+        if (!stats.logged_mode) {
+            stats.logged_mode = true;
+            LOG_INFO(Render_Vulkan,
+                     "WaitLimit: EDEN_NX2_WAIT_LIMIT_MS={}; depth/shadow/probe and already-drawn "
+                     "targets skip the draw after the cap and retry next frame; first-time "
+                     "color/UI still waits; 0 waits as before",
+                     WaitLimitMs());
+        }
+    }
+    const auto targets = texture_cache.ClassifyDrawTargets();
+    const auto reason = WaitLimitReasonFor(targets);
+    const int limit_ms = WaitLimitMs();
+    if (reason == WaitLimitReason::None) {
+        PipelineBuild* const pending = &build;
+        scheduler.Record([pending, library_cache, worker_only_build](vk::CommandBuffer) {
+            const auto begin = std::chrono::steady_clock::now();
+            const bool boost = !pending->IsBuilt();
+            pending->Wait(!worker_only_build || HeldDrawsClaimBuilds(), -1, true);
+            const auto held = std::chrono::steady_clock::now() - begin;
+            const auto held_ns =
+                std::chrono::duration_cast<std::chrono::nanoseconds>(held).count();
+            hold_time_ns.fetch_add(held_ns, std::memory_order::relaxed);
+            hold_time_total_ns.fetch_add(held_ns, std::memory_order::relaxed);
+            if (library_cache) {
+                library_cache->RecordHeldDraw(held);
+            }
+            if (boost) {
+                std::scoped_lock lock{wait_limit_stats.mutex};
+                ++wait_limit_stats.boosted;
+            }
+        });
+        NoteDrawnTarget(targets);
+        MaybeReportWaitLimit();
+        return true;
+    }
+    build.KickUrgent();
+    const auto begin = std::chrono::steady_clock::now();
+    const bool ready = build.Wait(false, limit_ms, true);
+    const auto held = std::chrono::steady_clock::now() - begin;
+    const auto held_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(held).count();
+    hold_time_ns.fetch_add(held_ns, std::memory_order::relaxed);
+    hold_time_total_ns.fetch_add(held_ns, std::memory_order::relaxed);
+    if (library_cache) {
+        library_cache->RecordHeldDraw(held);
+    }
+    {
+        std::scoped_lock lock{stats.mutex};
+        ++stats.boosted;
+        if (ready) {
+            ++stats.finished_in_cap;
+        }
+    }
+    if (!ready) {
+        NoteWaitLimitSkip(targets, reason, held, limit_ms);
+        MaybeReportWaitLimit();
+        return false;
+    }
+    NoteDrawnTarget(targets);
+    MaybeReportWaitLimit();
+    return true;
+}
+
 } // Anonymous namespace
 
 void NoteDrawReuseProbeFrame();
@@ -537,6 +831,83 @@ GraphicsPipeline::GraphicsPipeline(
         return info.stores_global_memory || any_written(info.storage_buffers_descriptors) ||
                any_written(info.image_descriptors) || any_written(info.image_buffer_descriptors);
     });
+    writes_images = std::ranges::any_of(stage_infos, [&](const Shader::Info& info) {
+        return any_written(info.image_descriptors) || any_written(info.image_buffer_descriptors);
+    });
+    const auto block = [&](DeltaBlocker blocker) {
+        if (delta_blocker == DeltaBlocker::None) {
+            delta_blocker = blocker;
+        }
+    };
+    if (writes_images) {
+        block(DeltaBlocker::WritesImages);
+    }
+    if (IsMeshPipeline()) {
+        block(DeltaBlocker::Mesh);
+    }
+    for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
+        const Shader::Info& info = stage_infos[stage];
+        u32& handles = handle_constant_buffers[stage];
+        auto& ranges = handle_ranges[stage];
+        std::array<boost::container::small_vector<std::pair<u32, u32>, 8>,
+                   Tegra::Engines::Maxwell3D::Regs::MaxConstBuffers>
+            words;
+        const auto add_range = [&](u32 slot, u32 begin, u32 end) {
+            handles |= 1U << slot;
+            auto& range = ranges[slot];
+            range = range.first == range.second
+                        ? std::pair{begin, end}
+                        : std::pair{(std::min)(range.first, begin), (std::max)(range.second, end)};
+            words[slot].emplace_back(begin, end);
+        };
+        // The words read_handle reads. Handles computed at draw time neither block delta draws
+        // nor take part: ComputedHandlesChanged evaluates them again for each delta draw, from
+        // the constant buffers bound and the data in memory then.
+        const auto add = [&](const auto& desc) {
+            if (desc.handle_program != ~0U) {
+                has_computed_handles = true;
+                return;
+            }
+            // Each element's word on its own: strided arrays leave words between the handles.
+            // Dekubi: storage pointer words stay in (EXP21 is live, so they may be read as handles).
+            for (u32 index = 0; index < desc.count; ++index) {
+                const u32 offset = desc.cbuf_offset + (index << desc.size_shift);
+                add_range(desc.cbuf_index, offset, offset + 4);
+            }
+            if constexpr (requires { desc.has_secondary; }) {
+                if (desc.has_secondary) {
+                    add_range(desc.secondary_cbuf_index, desc.secondary_cbuf_offset,
+                              desc.secondary_cbuf_offset + 4);
+                }
+            }
+        };
+        for (const auto& desc : info.texture_buffer_descriptors) {
+            add(desc);
+        }
+        for (const auto& desc : info.image_buffer_descriptors) {
+            add(desc);
+        }
+        for (const auto& desc : info.texture_descriptors) {
+            add(desc);
+        }
+        for (const auto& desc : info.image_descriptors) {
+            add(desc);
+        }
+        for (u32 slot = 0; slot < words.size(); ++slot) {
+            auto& list = words[slot];
+            std::ranges::sort(list);
+            const size_t first = handle_words.size();
+            for (const auto& range : list) {
+                if (handle_words.size() != first && range.first <= handle_words.back().second) {
+                    handle_words.back().second = (std::max)(handle_words.back().second, range.second);
+                } else {
+                    handle_words.push_back(range);
+                }
+            }
+            handle_word_index[stage][slot] = {static_cast<u16>(first),
+                                              static_cast<u16>(handle_words.size() - first)};
+        }
+    }
 
     if (library_cache) {
         // Graphics pipeline libraries: one set per stage (set index = stage index), plain
@@ -948,6 +1319,8 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
     zero_texture_handles = 0;
     boost::container::small_vector<VideoCommon::ImageViewInOut, 160> views;
     boost::container::small_vector<VideoCommon::SamplerId, 96> samplers;
+    boost::container::small_vector<ComputedHandle, 16> computed_handles;
+    boost::container::small_vector<u32, 64> computed_values;
     views.reserve(num_image_elements);
     samplers.reserve(num_textures);
     // EDEN_NX2_EXP32: texture binding memo (TextureMemo), for pipelines whose image bindings are
@@ -980,6 +1353,8 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
 
     const auto& regs{maxwell3d->regs};
     const bool via_header_index{regs.sampler_binding == Maxwell::SamplerBinding::ViaHeaderBinding};
+
+
     const auto config_stage{[&](size_t stage) LAMBDA_FORCEINLINE {
         const Shader::Info& info{stage_infos[stage]};
         {
@@ -997,17 +1372,39 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
             }
         }
         const auto& cbufs{maxwell3d->state.shader_stages[stage].const_buffers};
+        const auto cbuf_address{[&cbufs](u32 cbuf) -> GPUVAddr {
+            return cbuf < cbufs.size() && cbufs[cbuf].enabled ? cbufs[cbuf].address : GPUVAddr{};
+        }};
+        // Records each handle computed at draw time (ComputedHandlesChanged evaluates them again):
+        // one entry per descriptor, and its elements' values in order.
+        const auto note_computed{[&](const auto& desc, u32 element, u32 value) {
+            using Desc = std::remove_cvref_t<decltype(desc)>;
+            const auto [kind, first] = [&]() -> std::pair<ComputedHandleKind, const Desc*> {
+                if constexpr (std::is_same_v<Desc, Shader::TextureBufferDescriptor>) {
+                    return {TextureBuffer, info.texture_buffer_descriptors.data()};
+                } else if constexpr (std::is_same_v<Desc, Shader::ImageBufferDescriptor>) {
+                    return {ImageBuffer, info.image_buffer_descriptors.data()};
+                } else if constexpr (std::is_same_v<Desc, Shader::TextureDescriptor>) {
+                    return {Texture, info.texture_descriptors.data()};
+                } else {
+                    return {Image, info.image_descriptors.data()};
+                }
+            }();
+            if (element == 0) {
+                computed_handles.push_back({static_cast<u8>(stage), kind,
+                                            static_cast<u16>(&desc - first), 0,
+                                            static_cast<u32>(computed_values.size())});
+            }
+            ++computed_handles.back().count;
+            computed_values.push_back(value);
+        }};
         const auto read_handle{[&](const auto& desc, u32 index) {
             if (desc.handle_program != ~0U) {
                 // Read by the shader from a storage buffer: computed for this draw.
                 const auto evaluate{[&](u64 storage_alignment) {
-                    return VideoCommon::EvaluateTextureHandle(
-                        info, desc.handle_program, *gpu_memory,
-                        [&](u32 cbuf) -> GPUVAddr {
-                            return cbuf < cbufs.size() && cbufs[cbuf].enabled ? cbufs[cbuf].address
-                                                                              : GPUVAddr{};
-                        },
-                        storage_alignment);
+                    return VideoCommon::EvaluateTextureHandle(info, desc.handle_program,
+                                                              *gpu_memory, cbuf_address,
+                                                              storage_alignment, index);
                 }};
                 // The program's storage offsets are relative to the buffer address aligned down
                 // to the host storage alignment (StorageOffset). EDEN_NX2_HANDLE_ALIGN=0 reads
@@ -1030,6 +1427,7 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
                                  evaluate(storage_alignment), evaluate(1));
                     }
                 }
+                note_computed(desc, index, raw);
                 return TexturePair(raw, via_header_index);
             }
             ASSERT(cbufs[desc.cbuf_index].enabled);
@@ -1074,7 +1472,48 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
         }
         // EDEN_NX2_EXP21 (default 1; 0 = off): no texture for a handle that is a buffer address.
         const bool null_pointer_handles{VideoCore::Nx2Debug::Experiment(21) != 0};
+        u32 texture{};
         for (const auto& desc : info.texture_descriptors) {
+            if (desc.count > 1 && desc.handle_program != ~0U) {
+                // A table of handles the shader indexes (one shadow map per light, say), read in
+                // one go; elements repeating a sampler share its lookup (zortos293/Lichii#1485:
+                // Ocarina of Time's light-cluster shadow maps, the dark grid over water).
+                static const bool align_storage{[] {
+                    const char* const value{std::getenv("EDEN_NX2_HANDLE_ALIGN")};
+                    return value == nullptr || *value != '0';
+                }()};
+                const size_t first{views.size()};
+                u32 last_sampler_index{~0U};
+                VideoCommon::SamplerId sampler{};
+                VideoCommon::EvaluateTextureHandles(
+                    info, desc.handle_program, *gpu_memory, cbuf_address,
+                    align_storage ? device.GetStorageBufferAlignment() : 1, desc.count,
+                    [&](u32 element, u32 raw) {
+                        note_computed(desc, element, raw);
+                        const auto handle{TexturePair(raw, via_header_index)};
+                        views.push_back({handle.first});
+                        if (texture_memo_on) {
+                            sampler_handles.push_back(handle.second);
+                            return;
+                        }
+                        if (handle.second != last_sampler_index) {
+                            sampler = texture_cache.GetSamplerId(handle.second, false);
+                            last_sampler_index = handle.second;
+                        }
+                        samplers.push_back(sampler);
+                    });
+                if (VideoCommon::HandleTableNotes::Wanted()) {
+                    std::vector<u32> tics(desc.count);
+                    for (u32 index = 0; index < desc.count; ++index) {
+                        tics[index] = views[first + index].index;
+                    }
+                    VideoCommon::HandleTableNotes::Note(key.unique_hashes[stage + 1], texture,
+                                                        tics);
+                }
+                ++texture;
+                continue;
+            }
+            ++texture;
             for (u32 index = 0; index < desc.count; ++index) {
                 const auto handle{null_pointer_handles &&
                                           VideoCommon::HandleIsStoragePointer(info, desc, index)
@@ -1243,6 +1682,23 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
                 view_index += Shader::NumDescriptors(info.image_descriptors);
             }
         }
+    }
+    if (std::exchange(capture_delta, false) && delta_blocker == DeltaBlocker::None) {
+        const auto same_view = [](const VideoCommon::ImageViewInOut& lhs,
+                                  const VideoCommon::ImageViewInOut& rhs) {
+            return lhs.index == rhs.index && lhs.id == rhs.id;
+        };
+        if (std::exchange(verify_delta, false)) {
+            delta_mismatch = !delta_views_valid ||
+                             !std::ranges::equal(views, delta_views, same_view) ||
+                             !std::ranges::equal(samplers, delta_samplers);
+        }
+        delta_views.assign(views.begin(), views.end());
+        delta_samplers.assign(samplers.begin(), samplers.end());
+        delta_computed_handles.assign(computed_handles.begin(), computed_handles.end());
+        delta_computed_values.assign(computed_values.begin(), computed_values.end());
+        configured_stages = Spec::enabled_stages;
+        delta_views_valid = true;
     }
 
     if constexpr (Spec::has_texture_buffers || Spec::has_image_buffers) {
@@ -1498,6 +1954,141 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
     return configured;
 }
 
+GraphicsPipeline::DeltaBlocker GraphicsPipeline::DeltaDrawBlocker() const noexcept {
+    if (delta_blocker != DeltaBlocker::None) {
+        return delta_blocker;
+    }
+    if (has_computed_handles && !VideoCommon::Nx2FastDraw::HandleDeltas()) {
+        return DeltaBlocker::ComputedHandles;
+    }
+    return delta_views_valid ? DeltaBlocker::None : DeltaBlocker::NotConfigured;
+}
+
+bool GraphicsPipeline::ComputedHandlesChanged() const {
+    // As ConfigureImpl's EDEN_NX2_HANDLE_ALIGN.
+    static const bool align_storage{[] {
+        const char* const value{std::getenv("EDEN_NX2_HANDLE_ALIGN")};
+        return value == nullptr || *value != '0';
+    }()};
+    for (const ComputedHandle& handle : delta_computed_handles) {
+        const Shader::Info& info{stage_infos[handle.stage]};
+        const auto& cbufs{maxwell3d->state.shader_stages[handle.stage].const_buffers};
+        u32 program{};
+        switch (handle.kind) {
+        case TextureBuffer:
+            program = info.texture_buffer_descriptors[handle.descriptor].handle_program;
+            break;
+        case ImageBuffer:
+            program = info.image_buffer_descriptors[handle.descriptor].handle_program;
+            break;
+        case Texture:
+            program = info.texture_descriptors[handle.descriptor].handle_program;
+            break;
+        default:
+            program = info.image_descriptors[handle.descriptor].handle_program;
+            break;
+        }
+        // Each element as ConfigureImpl computes it (EvaluateTextureHandles gives the values
+        // EvaluateTextureHandle does, reading the words the elements share once).
+        bool changed{};
+        VideoCommon::EvaluateTextureHandles(
+            info, program, *gpu_memory,
+            [&](u32 cbuf) -> GPUVAddr {
+                return cbuf < cbufs.size() && cbufs[cbuf].enabled ? cbufs[cbuf].address
+                                                                  : GPUVAddr{};
+            },
+            align_storage ? device.GetStorageBufferAlignment() : 1, handle.count,
+            [&](u32 element, u32 value) {
+                changed |= value != delta_computed_values[handle.first_value + element];
+            });
+        if (changed) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool GraphicsPipeline::ConfigureDelta(bool is_indexed) {
+    namespace Profile = VideoCommon::Nx2Profile;
+    // ConfigureImpl without reading handles and resolving image views, samplers and texture
+    // buffers: the buffers are resolved, synchronized and bound as it does.
+    buffer_cache.SetUniformBuffersState(enabled_uniform_buffer_masks, &uniform_buffer_sizes);
+    {
+        Profile::Scope scope{Profile::Zone::ReadHandles};
+        for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
+            if (!configured_stages[stage]) {
+                continue;
+            }
+            buffer_cache.UnbindGraphicsStorageBuffers(stage);
+            size_t ssbo_index{};
+            for (const auto& desc : stage_infos[stage].storage_buffers_descriptors) {
+                ASSERT(desc.count == 1);
+                buffer_cache.BindGraphicsStorageBuffer(stage, ssbo_index, desc.cbuf_index,
+                                                       desc.cbuf_offset, desc.is_written,
+                                                       desc.indirect_offset);
+                ++ssbo_index;
+            }
+        }
+    }
+    {
+        Profile::Scope scope{Profile::Zone::UpdateBuffers};
+        buffer_cache.UpdateGraphicsBuffers(is_indexed);
+        buffer_cache.BindHostGeometryBuffers(is_indexed);
+    }
+    {
+        Profile::Scope scope{Profile::Zone::DescriptorAcquire};
+        guest_descriptor_queue.Acquire(scheduler, num_descriptor_entries, uses_descriptor_buffer);
+    }
+    const auto& regs{maxwell3d->regs};
+    RescalingPushConstant rescaling;
+    RenderAreaPushConstant render_area;
+    const VideoCommon::SamplerId* samplers_it{delta_samplers.data()};
+    const VideoCommon::ImageViewInOut* views_it{delta_views.data()};
+    for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
+        if (!configured_stages[stage]) {
+            continue;
+        }
+        {
+            Profile::Scope scope{Profile::Zone::BindStageBuffers};
+            buffer_cache.BindHostStageBuffers(stage);
+        }
+        {
+            Profile::Scope scope{Profile::Zone::PushDescriptors};
+            if (library_cache && stage == NUM_STAGES - 1) {
+                rescaling.Seek(GPL_FRAGMENT_TEXTURE_SCALING_BASE, GPL_FRAGMENT_IMAGE_SCALING_BASE);
+            }
+            PushImageDescriptors(texture_cache, guest_descriptor_queue, stage_infos[stage],
+                                 rescaling, samplers_it, views_it);
+        }
+        if (stage_infos[stage].uses_render_area) {
+            render_area.uses_render_area = true;
+            const u32 clip_width = regs.surface_clip.width, clip_height = regs.surface_clip.height;
+            const bool clip_set = clip_width != 0 && clip_height != 0;
+            render_area.words = {static_cast<float>(clip_set ? clip_width : u32{regs.rt[0].width}),
+                                 static_cast<float>(clip_set ? clip_height : u32{regs.rt[0].height})};
+        }
+    }
+    if (buffer_cache.any_buffer_uploaded) {
+        buffer_cache.runtime.PostCopyBarrier();
+        buffer_cache.any_buffer_uploaded = false;
+    }
+    {
+        Profile::Scope scope{Profile::Zone::RenderTargets};
+        texture_cache.UpdateRenderTargets(false);
+        const std::span<const VideoCommon::ImageViewInOut> view_span{delta_views};
+        texture_cache.CheckFeedbackLoop(view_span);
+        if (scheduler.HasFragmentBarrier() &&
+            (scheduler.RenderPassHasStores() || texture_cache.SamplesRenderTarget(view_span))) {
+            scheduler.RequestOutsideRenderPassOperationContext();
+        }
+    }
+    if (IsBuilt() && (!pipeline || build->Failed())) {
+        return false;
+    }
+    Profile::Scope scope{Profile::Zone::ConfigureDraw};
+    return ConfigureDraw(rescaling, render_area);
+}
+
 bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
                                      const RenderAreaPushConstant& render_area) {
     if (guest_descriptor_queue.UpdateCount() != num_descriptor_entries) {
@@ -1541,8 +2132,10 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
         // The mesh program runs as a compute dispatch outside the render pass and writes the
         // triangles the draw then reads; both use the descriptor set committed here.
         scheduler.RequestOutsideRenderPassOperationContext();
-        if (!IsBuilt()) {
-            scheduler.Record([this](vk::CommandBuffer) { build->Wait(!worker_only_build); });
+        if (!IsBuilt() &&
+            !HoldForPipelineBuild(*build, scheduler, library_cache, texture_cache,
+                                  worker_only_build)) {
+            return false;
         }
         // EDEN_NX2_MESH_FIRST: the task (or mesh) compute shader adds the draw's first
         // workgroup index, as the native mesh path does.
@@ -1685,19 +2278,12 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
         scheduler.NoteRenderPassStores();
     }
     if (!IsBuilt()) {
-        // Wait for the pipeline to be built
-        scheduler.Record([this](vk::CommandBuffer) {
-            const auto begin = std::chrono::steady_clock::now();
-            build->Wait(!worker_only_build);
-            const auto held = std::chrono::steady_clock::now() - begin;
-            const auto held_ns =
-                std::chrono::duration_cast<std::chrono::nanoseconds>(held).count();
-            hold_time_ns.fetch_add(held_ns, std::memory_order::relaxed);
-            hold_time_total_ns.fetch_add(held_ns, std::memory_order::relaxed);
-            if (library_cache) {
-                library_cache->RecordHeldDraw(held);
-            }
-        });
+        if (!HoldForPipelineBuild(*build, scheduler, library_cache, texture_cache,
+                                  worker_only_build)) {
+            return false;
+        }
+    } else {
+        NoteDrawnTarget(texture_cache.ClassifyDrawTargets());
     }
     const bool is_rescaling{texture_cache.IsRescaling()};
     const bool update_rescaling{scheduler.UpdateRescaling(is_rescaling, IsMeshPipeline())};

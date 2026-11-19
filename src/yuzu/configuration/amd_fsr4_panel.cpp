@@ -156,10 +156,10 @@ void AmdFsr4Panel::Refresh() {
     icon_label->setText(ready ? QStringLiteral("<span style=\"color:#2ea043\">&#10004;</span>")
                               : QStringLiteral("<span style=\"color:#d29922\">&#9888;</span>"));
     status_label->setText(
-        ready ? Tr("<b>Ready.</b> Found AMD's FidelityFX runtime from FidelityFX SDK %1. FSR 4 runs "
-                   "if AMD's driver offers it for this GPU; otherwise FSR 3.1 does.")
+        ready ? Tr("<b>Ready.</b> Found AMD's FidelityFX runtime from FidelityFX SDK %1 (Redstone). "
+                   "FSR 4 ML upscaling runs if AMD's driver offers it for this GPU; otherwise FSR 3.1 does.")
                     .arg(version)
-              : Tr("<b>AMD's files needed:</b> the FidelityFX runtime from AMD's FidelityFX SDK %1 "
+              : Tr("<b>AMD's files needed:</b> the FidelityFX runtime from AMD's FidelityFX SDK %1 (Redstone) "
                    "(amd_fidelityfx_loader_vk.dll and amd_fidelityfx_upscaler_vk.dll). Until then, "
                    "FSR 3.1 is used.")
                     .arg(version));

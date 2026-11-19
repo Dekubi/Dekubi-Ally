@@ -70,6 +70,11 @@ struct RequestResult {
     int status{};
 };
 
+// The system CA bundle on Linux (distributions keep it in different places), or nullptr when the
+// TLS library's default is used. An AppImage carries the OpenSSL of the system it was built on,
+// whose default path may not exist elsewhere.
+const char* SystemCaBundle();
+
 // Make a request via httplib, and return the response and its status.
 RequestResult Fetch(const std::string &url, const std::string &path);
 

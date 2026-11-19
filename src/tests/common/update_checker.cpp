@@ -255,11 +255,11 @@ Common::Net::Release MakeDekubiRelease(const std::string& tag,
     }
     const nlohmann::json json{
         {"tag_name", tag}, {"name", "Dekubi " + tag}, {"prerelease", true}, {"assets", assets}};
-    return Common::Net::Release::FromJson(json, "https://api.github.com", "Frizti/Lichii").value();
+    return Common::Net::Release::FromJson(json, "https://api.github.com", "Dekubi/Dekubi-Ally").value();
 }
 
 std::string GitHubUrl(std::string_view repo, std::string_view tag, std::string_view name) {
-    return fmt::format("https://github.com/Frizti/{}/releases/download/{}/{}", repo, tag, name);
+    return fmt::format("https://github.com/Dekubi/{}/releases/download/{}/{}", repo, tag, name);
 }
 
 } // namespace
@@ -288,17 +288,18 @@ TEST_CASE("Dekubi versions compare numerically, with a patch number", "[updater]
     CHECK_FALSE(UpdateChecker::ParseDekubiVersion(invalid));
 }
 
-TEST_CASE("Dekubi tags and build versions accept the old Frizti names", "[updater]") {
-    CHECK(UpdateChecker::ParseDekubiTag("dekubi-v4") == DekubiVersion{4, 0});
+TEST_CASE("Dekubi tags are v1.1.2 (or V1.1.2, dekubi-v1.1.2)", "[updater]") {
+    CHECK(UpdateChecker::ParseDekubiTag("v1.1.2") == DekubiVersion{1, 1, 2});
+    CHECK(UpdateChecker::ParseDekubiTag("V1.1.2") == DekubiVersion{1, 1, 2});
+    CHECK(UpdateChecker::ParseDekubiTag("v1.2") == DekubiVersion{1, 2});
+    CHECK(UpdateChecker::ParseDekubiTag("v4") == DekubiVersion{4, 0});
     CHECK(UpdateChecker::ParseDekubiTag("dekubi-v4.1") == DekubiVersion{4, 1});
-    CHECK(UpdateChecker::ParseDekubiTag("frizti-v3") == DekubiVersion{3, 0});
-    CHECK(UpdateChecker::ParseDekubiTag("frizti-v3.5") == DekubiVersion{3, 5});
     CHECK(UpdateChecker::ParseBuildVersion("Dekubi v4") == DekubiVersion{4, 0});
     CHECK(UpdateChecker::ParseBuildVersion("Frizti v3.5") == DekubiVersion{3, 5});
 
     const std::string tag =
-        GENERATE("", "dekubi-v", "dekubi-4", "Dekubi-v4", "dekubi-v4-rc", "frizti-v4.0",
-                 "build-71", "v4", "lichii-frizti-v4");
+        GENERATE("", "v", "dekubi-v", "dekubi-4", "Dekubi-V1.0.0", "V1.0.0-Stable", "v1.1.2-rc",
+                 "frizti-v4", "build-71", "1.1.2", "lichii-frizti-v4");
     CHECK_FALSE(UpdateChecker::ParseDekubiTag(tag));
     const std::string version = GENERATE("", "build-71", "Lichii", "abc1234567-nx2", "Dekubi v",
                                          "Dekubi v4 ", "dekubi v4", "Dekubi 4");
@@ -316,61 +317,60 @@ TEST_CASE("GitHub digests are parsed only when they are SHA-256", "[updater]") {
     CHECK_FALSE(Common::Net::ParseSha256Digest(digest));
 }
 
-TEST_CASE("Dekubi selects only the Windows package from the Frizti repository", "[updater]") {
+TEST_CASE("Dekubi selects only the Windows package from its own repository", "[updater]") {
     const auto source = UpdateChecker::DefaultSource();
     CHECK(source.origin == "https://api.github.com");
-    CHECK(source.api_path == "/repos/Frizti/Lichii/releases?per_page=100");
+    CHECK(source.api_path == "/repos/Dekubi/Dekubi-Ally/releases?per_page=100");
     CHECK_FALSE(source.test);
 
-    const std::string tag = "dekubi-v5";
-    const std::string repo = GENERATE("Lichii", "Dekubi");
+    const std::string tag = "v1.1.2";
+    const std::string repo = "Dekubi-Ally";
     const auto release = MakeDekubiRelease(
-        tag, {GitHubUrl(repo, tag, "Dekubi-v5-debug-symbols-not-needed-to-play.zip"),
-              GitHubUrl(repo, tag, "Dekubi-v5-Windows-x64.zip")});
+        tag, {GitHubUrl(repo, tag, "Dekubi_Ally-v1.1.2-linux-x86_64.AppImage"),
+              GitHubUrl(repo, tag, "Dekubi_Ally_v1.1.2_Windows_x64.zip")});
     const auto asset = UpdateChecker::SelectDekubiAsset(release, source);
     REQUIRE(asset);
-    CHECK(asset->filename == "Dekubi-v5-Windows-x64.zip");
+    CHECK(asset->filename == "Dekubi_Ally_v1.1.2_Windows_x64.zip");
     CHECK(asset->url == "https://github.com");
-    CHECK(asset->path == "/Frizti/" + repo + "/releases/download/dekubi-v5/" + asset->filename);
+    CHECK(asset->path == "/Dekubi/Dekubi-Ally/releases/download/v1.1.2/" + asset->filename);
     CHECK(asset->sha256 == "597200a1bffa3d2ecfb2f3f2a464515d57d7f6dc674060f16719830c790bada7");
     CHECK(asset->size == 68126892);
 
     // Selected, but the dialog refuses to install it without a digest.
     const auto no_digest = MakeDekubiRelease(
-        tag, {GitHubUrl(repo, tag, "Dekubi-v5-Windows-x64.zip")}, "sha256:short");
+        tag, {GitHubUrl(repo, tag, "Dekubi_Ally_v1.1.2_Windows_x64.zip")}, "sha256:short");
     const auto unverified = UpdateChecker::SelectDekubiAsset(no_digest, source);
     REQUIRE(unverified);
     CHECK(unverified->sha256.empty());
 }
 
-TEST_CASE("Dekubi ignores debug zips, old asset names and lookalike URLs", "[updater]") {
+TEST_CASE("Dekubi ignores other files, other versions and lookalike URLs", "[updater]") {
     const std::string url = GENERATE(
-        GitHubUrl("Lichii", "dekubi-v5", "Dekubi-v5-debug-symbols-not-needed-to-play.zip"),
-        GitHubUrl("Lichii", "dekubi-v5", "Lichii-Frizti-v5-Windows-x64.zip"),
-        GitHubUrl("Lichii", "dekubi-v5", "Dekubi-v4-Windows-x64.zip"),
-        GitHubUrl("Lichii", "dekubi-v4", "Dekubi-v5-Windows-x64.zip"),
-        GitHubUrl("Other", "dekubi-v5", "Dekubi-v5-Windows-x64.zip"),
-        std::string{"https://github.com/zortos293/Lichii/releases/download/dekubi-v5/"
-                    "Dekubi-v5-Windows-x64.zip"},
-        std::string{"http://github.com/Frizti/Lichii/releases/download/dekubi-v5/"
-                    "Dekubi-v5-Windows-x64.zip"},
-        std::string{"https://github.com.evil.com/Frizti/Lichii/releases/download/dekubi-v5/"
-                    "Dekubi-v5-Windows-x64.zip"},
-        std::string{"http://127.0.0.1:8000/Dekubi-v5-Windows-x64.zip"},
-        std::string{"https://github.com/Frizti/Lichii/archive/refs/tags/dekubi-v5.zip"});
-    const auto release = MakeDekubiRelease("dekubi-v5", {url});
+        GitHubUrl("Dekubi-Ally", "v1.1.2", "Dekubi_Ally-v1.1.2-linux-x86_64.AppImage"),
+        GitHubUrl("Dekubi-Ally", "v1.1.2", "Dekubi_Ally_v1.1.1_Windows_x64.zip"),
+        GitHubUrl("Dekubi-Ally", "v1.1.1", "Dekubi_Ally_v1.1.2_Windows_x64.zip"),
+        GitHubUrl("Other", "v1.1.2", "Dekubi_Ally_v1.1.2_Windows_x64.zip"),
+        std::string{"https://github.com/Frizti/Lichii/releases/download/v1.1.2/"
+                    "Dekubi_Ally_v1.1.2_Windows_x64.zip"},
+        std::string{"http://github.com/Dekubi/Dekubi-Ally/releases/download/v1.1.2/"
+                    "Dekubi_Ally_v1.1.2_Windows_x64.zip"},
+        std::string{"https://github.com.evil.com/Dekubi/Dekubi-Ally/releases/download/v1.1.2/"
+                    "Dekubi_Ally_v1.1.2_Windows_x64.zip"},
+        std::string{"http://127.0.0.1:8000/Dekubi_Ally_v1.1.2_Windows_x64.zip"},
+        std::string{"https://github.com/Dekubi/Dekubi-Ally/archive/refs/tags/v1.1.2.zip"});
+    const auto release = MakeDekubiRelease("v1.1.2", {url});
     CHECK_FALSE(UpdateChecker::SelectDekubiAsset(release, UpdateChecker::DefaultSource()));
 }
 
 TEST_CASE("Dekubi picks the newest newer release that has a package", "[updater]") {
     const auto make = [](const std::string& tag, const std::string& name) {
-        return MakeDekubiRelease(tag, {GitHubUrl("Lichii", tag, name)});
+        return MakeDekubiRelease(tag, {GitHubUrl("Dekubi-Ally", tag, name)});
     };
     const auto releases = std::array{
-        make("frizti-v3", "Lichii-Frizti-v3-Windows-x64.zip"),
-        make("dekubi-v4", "Dekubi-v4-Windows-x64.zip"),
-        make("dekubi-v5", "Dekubi-v5-debug-symbols-not-needed-to-play.zip"),
-        make("dekubi-v4.1", "Dekubi-v4.1-Windows-x64.zip"),
+        make("V1.0.0-Stable", "Dekubi_Ally_v1.0.0-Stable_Windows_x64_Portable.zip"),
+        make("v1.1.2", "Dekubi_Ally_v1.1.2_Windows_x64.zip"),
+        make("v1.2", "Dekubi_Ally-v1.2-linux-x86_64.AppImage"),
+        make("v1.1.3", "Dekubi_Ally_v1.1.3_Windows_x64.zip"),
         make("build-99", "lichii-windows-x86_64.zip"),
     };
     const auto source = UpdateChecker::DefaultSource();
@@ -378,31 +378,31 @@ TEST_CASE("Dekubi picks the newest newer release that has a package", "[updater]
         const auto update = UpdateChecker::SelectDekubiUpdate(releases, current, source);
         return update ? update->tag : std::string{};
     };
-    CHECK(select({3, 5}) == "dekubi-v4.1");
-    CHECK(select({4, 0}) == "dekubi-v4.1");
-    CHECK(select({4, 1}).empty());
-    CHECK(select({6, 0}).empty());
-    CHECK_FALSE(UpdateChecker::SelectDekubiUpdate({}, {4, 0}, source));
+    CHECK(select({1, 1}) == "v1.1.3");
+    CHECK(select({1, 1, 2}) == "v1.1.3");
+    CHECK(select({1, 1, 3}).empty());
+    CHECK(select({2, 0}).empty());
+    CHECK_FALSE(UpdateChecker::SelectDekubiUpdate({}, {1, 1}, source));
 }
 
 TEST_CASE("Dekubi never offers a release whose notes hide it from the updater", "[updater]") {
     const auto make = [](const std::string& tag, const std::string& name, std::string body) {
-        auto release = MakeDekubiRelease(tag, {GitHubUrl("Lichii", tag, name)});
+        auto release = MakeDekubiRelease(tag, {GitHubUrl("Dekubi-Ally", tag, name)});
         release.body = std::move(body);
         return release;
     };
     const auto releases = std::array{
-        make("dekubi-v5.6", "Dekubi-v5.6-Windows-x64.zip", "Real notes"),
-        make("dekubi-v9", "Dekubi-v9-Windows-x64.zip",
+        make("v1.1.3", "Dekubi_Ally_v1.1.3_Windows_x64.zip", "Real notes"),
+        make("v2", "Dekubi_Ally_v2_Windows_x64.zip",
              "Big news!\n<!-- dekubi:no-update -->\nMore text"),
     };
     const auto source = UpdateChecker::DefaultSource();
     CHECK(UpdateChecker::HiddenFromUpdater(releases[1]));
     CHECK_FALSE(UpdateChecker::HiddenFromUpdater(releases[0]));
-    const auto update = UpdateChecker::SelectDekubiUpdate(releases, {5, 5}, source);
+    const auto update = UpdateChecker::SelectDekubiUpdate(releases, {1, 1, 2}, source);
     REQUIRE(update);
-    CHECK(update->tag == "dekubi-v5.6");
-    CHECK_FALSE(UpdateChecker::SelectDekubiUpdate(releases, {5, 6}, source));
+    CHECK(update->tag == "v1.1.3");
+    CHECK_FALSE(UpdateChecker::SelectDekubiUpdate(releases, {1, 1, 3}, source));
 }
 
 TEST_CASE("EDEN_UPDATE_URL takes https anywhere and plain http only on loopback", "[updater]") {
@@ -430,19 +430,24 @@ TEST_CASE("A test source accepts packages only from its own origin", "[updater]"
     const auto source = UpdateChecker::ParseSourceOverride("http://127.0.0.1:8000/releases.json");
     REQUIRE(source);
     const auto local =
-        MakeDekubiRelease("dekubi-v5", {"http://127.0.0.1:8000/Dekubi-v5-Windows-x64.zip"});
+        MakeDekubiRelease("v1.1.2", {"http://127.0.0.1:8000/Dekubi_Ally_v1.1.2_Windows_x64.zip"});
     const auto asset = UpdateChecker::SelectDekubiAsset(local, *source);
     REQUIRE(asset);
     CHECK(asset->url == "http://127.0.0.1:8000");
-    CHECK(asset->path == "/Dekubi-v5-Windows-x64.zip");
+    CHECK(asset->path == "/Dekubi_Ally_v1.1.2_Windows_x64.zip");
 
     const std::string url =
-        GENERATE(std::string{"http://127.0.0.1:9000/Dekubi-v5-Windows-x64.zip"},
-                 std::string{"http://127.0.0.1:80000/Dekubi-v5-Windows-x64.zip"},
-                 std::string{"http://127.0.0.1:8000/../Dekubi-v5-Windows-x64.zip"},
-                 std::string{"http://127.0.0.1:8000/x?/Dekubi-v5-Windows-x64.zip"},
-                 GitHubUrl("Lichii", "dekubi-v5", "Dekubi-v5-Windows-x64.zip"));
+        GENERATE(std::string{"http://127.0.0.1:9000/Dekubi_Ally_v1.1.2_Windows_x64.zip"},
+                 std::string{"http://127.0.0.1:80000/Dekubi_Ally_v1.1.2_Windows_x64.zip"},
+                 std::string{"http://127.0.0.1:8000/../Dekubi_Ally_v1.1.2_Windows_x64.zip"},
+                 std::string{"http://127.0.0.1:8000/x?/Dekubi_Ally_v1.1.2_Windows_x64.zip"},
+                 GitHubUrl("Dekubi-Ally", "v1.1.2", "Dekubi_Ally_v1.1.2_Windows_x64.zip"));
     CHECK_FALSE(
-        UpdateChecker::SelectDekubiAsset(MakeDekubiRelease("dekubi-v5", {url}), *source));
+        UpdateChecker::SelectDekubiAsset(MakeDekubiRelease("v1.1.2", {url}), *source));
 }
 
+TEST_CASE("Dekubi package names match the release files", "[updater]") {
+    const UpdateChecker::DekubiVersion version{.major = 1, .minor = 1, .patch = 3};
+    CHECK(UpdateChecker::DekubiAssetName(version) == "Dekubi_Ally_v1.1.3_Windows_x64.zip");
+    CHECK(UpdateChecker::DekubiAppImageName(version) == "Dekubi_Ally-v1.1.3-linux-x86_64.AppImage");
+}

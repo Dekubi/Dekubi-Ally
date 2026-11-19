@@ -205,6 +205,7 @@ static FileSys::VirtualFile VfsDirectoryCreateFileWrapper(const FileSys::Virtual
 
 // Video Core //
 #include "video_core/gpu.h"
+#include "video_core/ocarina_upscale.h"
 #include "video_core/renderer_base.h"
 #include "video_core/shader_notify.h"
 
@@ -1598,6 +1599,7 @@ void MainWindow::RestoreUIState() {
 
     ui->action_Show_Performance_Overlay->setChecked(
         UISettings::values.show_perf_overlay.GetValue());
+    ui->action_Show_Frame_Times->setChecked(UISettings::values.perf_overlay_times.GetValue());
     if (perf_overlay)
         perf_overlay->setVisible(ui->action_Show_Performance_Overlay->isChecked());
     Debugger::ToggleConsole();
@@ -1743,6 +1745,8 @@ void MainWindow::ConnectMenuEvents() {
     connect_menu(ui->action_Show_Filter_Bar, &MainWindow::OnToggleFilterBar);
     connect_menu(ui->action_Show_Status_Bar, &MainWindow::OnToggleStatusBar);
     connect_menu(ui->action_Show_Performance_Overlay, &MainWindow::OnTogglePerfOverlay);
+    connect(ui->action_Show_Frame_Times, &QAction::toggled, this,
+            [](bool checked) { UISettings::values.perf_overlay_times = checked; });
 #ifdef HAS_RESHADE
     connect_menu(ui->action_Post_Processing_Shaders, &MainWindow::OnPostProcessingShaders);
 #else
@@ -3654,7 +3658,16 @@ void MainWindow::ToggleFullscreen() {
 
 // We're going to return the screen that the given window has the most pixels on
 static QScreen* GuessCurrentScreen(QWidget* window) {
+    if (window->windowHandle() && window->windowHandle()->screen()) {
+        return window->windowHandle()->screen();
+    }
+    if (window->screen()) {
+        return window->screen();
+    }
     const QList<QScreen*> screens = QGuiApplication::screens();
+    if (screens.isEmpty()) {
+        return QGuiApplication::primaryScreen();
+    }
     return *std::max_element(
         screens.cbegin(), screens.cend(), [window](const QScreen* left, const QScreen* right) {
             const QSize left_size = left->geometry().intersected(window->geometry()).size();
@@ -3676,11 +3689,17 @@ void MainWindow::ShowFullscreen() {
             window->showFullScreen();
             return;
         }
+        const auto* screen = GuessCurrentScreen(window);
+        const auto screen_geometry = screen ? screen->geometry() : QRect();
         window->hide();
+        // A maximized window keeps the work area and ignores the new geometry, so the taskbar
+        // stays visible; the saved geometry restores the maximized state afterwards.
+        window->setWindowState(window->windowState() & ~Qt::WindowMaximized);
         window->setWindowFlags(window->windowFlags() | Qt::FramelessWindowHint);
-        const auto screen_geometry = GuessCurrentScreen(window)->geometry();
-        window->setGeometry(screen_geometry.x(), screen_geometry.y(), screen_geometry.width(),
-                            screen_geometry.height() + 1);
+        if (!screen_geometry.isEmpty()) {
+            window->setGeometry(screen_geometry.x(), screen_geometry.y(), screen_geometry.width(),
+                                screen_geometry.height() + 1);
+        }
         window->raise();
         window->showNormal();
     };
@@ -5372,8 +5391,85 @@ void MainWindow::UpdateStatusBar() {
 
     const auto res_info = Settings::values.resolution_info;
     const auto res_scale = res_info.up_factor;
-    res_scale_label->setText(
-        tr("Scale: %1x", "%1 is the resolution scaling factor").arg(res_scale));
+    QString res_scale_text;
+    QString res_tooltip;
+
+    const auto height_str = [](u32 lines) {
+        return lines == 2160   ? QStringLiteral("4K")
+               : lines == 4320 ? QStringLiteral("8K")
+                               : QStringLiteral("%1p").arg(lines);
+    };
+
+    const bool is_oot = (QtCommon::system != nullptr &&
+                         QtCommon::system->GetApplicationProcessProgramID() == 0x0400486024DEC000ULL);
+
+    if (is_oot) {
+        if (const auto picture = VideoCommon::ReadOcarinaPicture()) {
+            const QString arrow = QStringLiteral(" %1 ").arg(QChar(0x2192));
+            const QString dot = QStringLiteral(" %1 ").arg(QChar(0x00B7));
+            if (picture->backend >= 2 && picture->output_height != 0) {
+                const QString name = picture->backend == 4   ? QStringLiteral("DLSS")
+                                     : picture->backend == 5 ? QStringLiteral("XeSS")
+                                     : picture->backend == 3 ? QStringLiteral("FSR 4")
+                                                             : QStringLiteral("FSR 3.1");
+                const QString input = picture->input_up_to
+                                          ? tr("up to %1").arg(height_str(picture->input_height))
+                                          : height_str(picture->input_height);
+                res_scale_text =
+                    picture->output_height == picture->input_height
+                        ? QString(input + dot + tr("%1 Native").arg(name))
+                        : QString(input + arrow + height_str(picture->output_height) + dot + name);
+            } else {
+                const bool docked = Settings::IsDockedMode();
+                const bool max_resolution = Settings::OcarinaMaxResolutionOn();
+                const u32 base = docked ? (max_resolution ? 1440U : 1080U) : 1080U;
+                const u32 lines =
+                    static_cast<u32>(base * res_info.up_scale) >> res_info.down_shift;
+                res_scale_text = docked && !max_resolution ? tr("up to %1").arg(height_str(lines))
+                                                           : height_str(lines);
+            }
+        }
+    }
+
+    if (res_scale_text.isEmpty()) {
+        const bool docked = Settings::IsDockedMode();
+        const u32 base_w = docked ? 1920U : 1280U;
+        const u32 base_h = docked ? 1080U : 720U;
+        const u32 render_w = static_cast<u32>(base_w * res_info.up_scale) >> res_info.down_shift;
+        const u32 render_h = static_cast<u32>(base_h * res_info.up_scale) >> res_info.down_shift;
+
+        u32 out_w = 0;
+        u32 out_h = 0;
+        if (render_window != nullptr) {
+            const auto& layout = render_window->GetFramebufferLayout();
+            out_w = layout.screen.GetWidth() != 0 ? layout.screen.GetWidth() : layout.width;
+            out_h = layout.screen.GetHeight() != 0 ? layout.screen.GetHeight() : layout.height;
+        }
+
+        if (out_h > 0 && out_h != render_h) {
+            res_scale_text = QStringLiteral("Res: %1 %2 %3 (%4x)")
+                                 .arg(height_str(render_h))
+                                 .arg(QChar(0x2192))
+                                 .arg(height_str(out_h))
+                                 .arg(res_scale);
+        } else {
+            res_scale_text = QStringLiteral("Res: %1 (%2x)")
+                                 .arg(height_str(render_h))
+                                 .arg(res_scale);
+        }
+
+        res_tooltip = tr("Internal Render: %1x%2 | Output Presentation: %3x%4 | Scale: %5x")
+                          .arg(render_w)
+                          .arg(render_h)
+                          .arg(out_w > 0 ? out_w : render_w)
+                          .arg(out_h > 0 ? out_h : render_h)
+                          .arg(res_scale);
+    }
+
+    res_scale_label->setText(res_scale_text);
+    if (!res_tooltip.isEmpty()) {
+        res_scale_label->setToolTip(res_tooltip);
+    }
 
     if (Settings::SpeedLimitEnabled()) {
         emu_speed_label->setText(tr("Speed: %1% / %2%")
@@ -5383,7 +5479,44 @@ void MainWindow::UpdateStatusBar() {
         emu_speed_label->setText(tr("Speed: %1%").arg(results.emulation_speed * 100.0, 0, 'f', 0));
     }
 
-    QString fpsText = tr("Game: %1 FPS").arg(std::round(results.average_game_fps), 0, 'f', 0);
+    const double real_fps = results.average_game_fps;
+    QString fpsText;
+#ifdef HAS_LSFG
+    if (Settings::FrameGenActive()) {
+        const u32 mult = Settings::FrameGenMultiplier();
+        const double gen_fps = real_fps * static_cast<double>(mult - 1);
+        const double total_fps = real_fps * static_cast<double>(mult);
+
+        QString type_name;
+        switch (Settings::values.frame_gen_type.GetValue()) {
+        case Settings::FrameGenType::Fsr3:
+            type_name = QStringLiteral("FSR 3.1");
+            break;
+        case Settings::FrameGenType::Lsfg:
+            type_name = QStringLiteral("LSFG");
+            break;
+        case Settings::FrameGenType::DlssG:
+            type_name = QStringLiteral("DLSS-G");
+            break;
+        case Settings::FrameGenType::XessFg:
+            type_name = QStringLiteral("XeSS-FG");
+            break;
+        default:
+            type_name = QStringLiteral("FG");
+            break;
+        }
+
+        fpsText = tr("Real: %1 FPS | Gen: %2 FPS (%3 Total, %4 %5x)")
+                      .arg(std::round(real_fps), 0, 'f', 0)
+                      .arg(std::round(gen_fps), 0, 'f', 0)
+                      .arg(std::round(total_fps), 0, 'f', 0)
+                      .arg(type_name)
+                      .arg(mult);
+    } else
+#endif
+    {
+        fpsText = tr("Game: %1 FPS").arg(std::round(real_fps), 0, 'f', 0);
+    }
     if (!m_fpsSuffix.isEmpty())
         fpsText = fpsText % QStringLiteral(" (%1)").arg(m_fpsSuffix);
 
@@ -5573,6 +5706,7 @@ void MainWindow::UpdateUISettings() {
     UISettings::values.show_filter_bar = ui->action_Show_Filter_Bar->isChecked();
     UISettings::values.show_status_bar = ui->action_Show_Status_Bar->isChecked();
     UISettings::values.show_perf_overlay = ui->action_Show_Performance_Overlay->isChecked();
+    UISettings::values.perf_overlay_times = ui->action_Show_Frame_Times->isChecked();
 
     UISettings::values.first_start = false;
 

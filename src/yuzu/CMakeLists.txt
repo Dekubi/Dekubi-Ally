@@ -76,6 +76,8 @@ add_executable(dekubi
     configuration/configure_graphics.h
     configuration/amd_fsr4_panel.cpp
     configuration/amd_fsr4_panel.h
+    configuration/intel_xess_panel.cpp
+    configuration/intel_xess_panel.h
     configuration/nvidia_dlss_panel.cpp
     configuration/nvidia_dlss_panel.h
     configuration/configure_graphics.ui
@@ -209,6 +211,7 @@ add_executable(dekubi
     util/controller_navigation.cpp
     util/controller_navigation.h
     yuzu.qrc
+    dekubi/dekubi.qrc
     dekubi/dekubi_ui.cpp
     dekubi/dekubi_ui.h
     dekubi/home.cpp
@@ -218,10 +221,14 @@ add_executable(dekubi
     dekubi/main_window_dekubi.cpp
     dekubi/perf_overlay.cpp
     dekubi/perf_overlay.h
+    dekubi/mod_menu.cpp
+    dekubi/mod_menu.h
     dekubi/precompile_gate.cpp
     dekubi/precompile_gate.h
     dekubi/saves_window.cpp
     dekubi/saves_window.h
+    dekubi/switches_window.cpp
+    dekubi/switches_window.h
     dekubi/whats_new.cpp
     dekubi/whats_new.h
     util/export_log.cpp

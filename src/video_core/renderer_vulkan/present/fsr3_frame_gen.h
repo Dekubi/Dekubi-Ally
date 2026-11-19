@@ -4,6 +4,7 @@
 #pragma once
 
 #include <array>
+#include <array>
 #include <vector>
 
 #include "common/common_types.h"
@@ -28,15 +29,17 @@ class Scheduler;
 ///  - Descriptor-write caching (only update when image views change)
 class Fsr3FrameGen {
 public:
+    static constexpr size_t MAX_TARGETS = 8;
+
     explicit Fsr3FrameGen(const Device& device, MemoryAllocator& memory_allocator,
                           VkExtent2D extent, VkFormat format);
     ~Fsr3FrameGen();
 
     void Process(const Device& device, Scheduler& scheduler, VkImage current_frame,
-                 VkImageView current_view, u64 frame_count);
+                 u64 frame_count);
 
-    void Generate(const Device& device, Scheduler& scheduler, VkImageView destination_storage_view,
-                  float blend_factor, float flow_scale);
+    void Generate(const Device& device, Scheduler& scheduler, u32 target_index,
+                  VkImageView destination_storage_view, float blend_factor, float flow_scale);
 
     [[nodiscard]] bool IsReady() const {
         return m_initialized && m_has_history;
@@ -86,9 +89,8 @@ private:
     u64 m_last_frame_count{};
     bool m_flow_valid{};
 
-    // Descriptor caching: only update when views change
-    VkImageView m_cached_flow_current_view{VK_NULL_HANDLE};
-    VkImageView m_cached_interp_dest_view{VK_NULL_HANDLE};
+    // Descriptor caching per in-flight target: only update when views change
+    std::array<VkImageView, MAX_TARGETS> m_cached_interp_dest_views{};
 };
 
 } // namespace Vulkan

@@ -7,10 +7,12 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <functional>
 #include <mutex>
 #include <span>
+#include <utility>
 
 #include <boost/container/small_vector.hpp>
 
@@ -32,6 +34,7 @@ class ShaderNotify;
 namespace Vulkan {
 
 class Device;
+class PipelineCache;
 class PipelineStatistics;
 class Scheduler;
 
@@ -55,12 +58,22 @@ public:
 
     using BindCommand = std::function<void(vk::CommandBuffer)>;
 
-    [[nodiscard]] bool Configure(Tegra::Engines::KeplerCompute& kepler_compute,
-                                 Tegra::MemoryManager& gpu_memory, Scheduler& scheduler,
-                                 BufferCache& buffer_cache, TextureCache& texture_cache,
-                                 TextureCacheRuntime& texture_runtime,
-                                 std::optional<ByteAddressedShadow>& shadow,
-                                 BindCommand* deferred_bind = nullptr);
+    enum class ConfigureResult {
+        Ready,
+        Failed,
+        /// The pipeline is still building and the dispatch is skipped
+        /// (PipelineCache::SkipUnbuiltDispatch); nothing was bound or marked written.
+        Skipped,
+    };
+
+    [[nodiscard]] ConfigureResult Configure(Tegra::Engines::KeplerCompute& kepler_compute,
+                                            Tegra::MemoryManager& gpu_memory,
+                                            Scheduler& scheduler, BufferCache& buffer_cache,
+                                            TextureCache& texture_cache,
+                                            TextureCacheRuntime& texture_runtime,
+                                            PipelineCache& pipelines,
+                                            std::optional<ByteAddressedShadow>& shadow,
+                                            BindCommand* deferred_bind = nullptr);
 
     static constexpr u64 Ocarina1440pShader = 0x6bd913e1f34e83ebULL;
     /// The same output pass at 1:1, run at 1920x1080 in handheld with the Max Resolution add-on.
@@ -111,6 +124,15 @@ public:
         return is_built.load(std::memory_order::acquire);
     }
 
+    /// Waits up to `timeout` for the build where it runs (it is not claimed here).
+    /// @return True when the pipeline is built.
+    [[nodiscard]] bool WaitBuilt(std::chrono::microseconds timeout);
+
+    /// True the first time it is called, so a dispatch's wait for this build is logged once
+    [[nodiscard]] bool FirstWaitForBuild() noexcept {
+        return !std::exchange(wait_logged, true);
+    }
+
     /// Whether no build of this pipeline is left queued on a worker thread, which holds it
     [[nodiscard]] bool IsBuildTaskDone() const noexcept {
         return build_task_done.load(std::memory_order::acquire);
@@ -128,6 +150,7 @@ private:
     u64 shader_hash{};
     u32 num_descriptor_entries{};
     boost::container::small_vector<VideoCommon::ImageViewId, 8> written_images;
+    bool wait_logged{};
     std::vector<SampledImage> sampled_images;
 
     VideoCommon::ComputeUniformBufferSizes uniform_buffer_sizes{};

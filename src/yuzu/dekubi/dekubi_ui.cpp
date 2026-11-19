@@ -242,8 +242,11 @@ bool ApplyTheme() {
 }
 
 bool HidesSetting(const std::string& label) {
-    // No frame generation in Dekubi (real frames only), and its options are dev tools.
-    return Enabled() && label.starts_with("frame_gen");
+    if (!Enabled()) {
+        return false;
+    }
+    // Only hide internal developer dump settings
+    return label == "frame_gen_dump_flow";
 }
 
 QIcon Icon(const QString& name, int px) {
@@ -333,6 +336,12 @@ void RestructureMenus(Ui::MainWindow& ui, QMainWindow& window, const MenuHooks& 
     tools->addAction(ui.action_Verify_installed_contents);
     tools->addAction(ui.action_Data_Manager);
     tools->addSeparator();
+    if (hooks.switches) {
+        auto* switches_action = new QAction(tr("S&witches..."), &window);
+        QObject::connect(switches_action, &QAction::triggered, &window, hooks.switches);
+        tools->addAction(switches_action);
+        tools->addSeparator();
+    }
     tools->addAction(ui.action_Capture_Screenshot);
     tools->addMenu(ui.menu_Create_Shortcuts);
     tools->addSeparator();
@@ -475,6 +484,42 @@ QPushButton* MakeGraphicsButton(QWidget* parent, GraphicsHooks hooks) {
             Settings::values.anti_aliasing.GetValue(),
             [](Settings::AntiAliasing mode) { Settings::values.anti_aliasing.SetValue(mode); },
             true);
+        {
+            QMenu* fg_menu = menu.addMenu(QObject::tr("&Frame Generation"));
+            auto* fg_group = new QActionGroup(fg_menu);
+            const bool fg_on = Settings::values.frame_gen.GetValue();
+            QAction* fg_off = fg_menu->addAction(QObject::tr("Off"));
+            fg_off->setCheckable(true);
+            fg_off->setChecked(!fg_on);
+            fg_group->addAction(fg_off);
+            QObject::connect(fg_off, &QAction::triggered, fg_menu, [hooks] {
+                Settings::values.frame_gen.SetValue(false);
+                hooks.refresh();
+            });
+
+            for (u32 mult = 2; mult <= 4; ++mult) {
+                QAction* mult_action = fg_menu->addAction(QObject::tr("%1x Multiplier").arg(mult));
+                mult_action->setCheckable(true);
+                mult_action->setChecked(fg_on && Settings::values.frame_gen_multiplier.GetValue() == mult);
+                fg_group->addAction(mult_action);
+                QObject::connect(mult_action, &QAction::triggered, fg_menu, [mult, hooks] {
+                    Settings::values.frame_gen.SetValue(true);
+                    Settings::values.frame_gen_multiplier.SetValue(mult);
+                    hooks.refresh();
+                });
+            }
+
+            fg_menu->addSeparator();
+            for (const auto& [type, text] : ConfigurationShared::frame_gen_type_texts_map) {
+                QAction* type_action = fg_menu->addAction(QCoreApplication::translate("MainWindow", text.toUtf8().constData()));
+                type_action->setCheckable(true);
+                type_action->setChecked(Settings::values.frame_gen_type.GetValue() == type);
+                QObject::connect(type_action, &QAction::triggered, fg_menu, [type, hooks] {
+                    Settings::values.frame_gen_type.SetValue(type);
+                    hooks.refresh();
+                });
+            }
+        }
 #ifdef HAS_RESHADE
         QMenu* effects = menu.addMenu(QObject::tr("&Effects"));
         auto* effects_group = new QActionGroup(effects);
@@ -581,7 +626,7 @@ QString BackupSettings() {
         return {};
     }
     bool ok = true;
-    for (const QString name : {QStringLiteral("qt-config.ini"), QStringLiteral("frizti.ini")}) {
+    for (const QString& name : {QStringLiteral("qt-config.ini"), QStringLiteral("frizti.ini")}) {
         if (config.exists(name)) {
             ok &= QFile::copy(config.filePath(name), QDir(folder).filePath(name));
         }
@@ -621,7 +666,7 @@ bool RestoreSettingsFiles(const QString& backup) {
         return false;
     }
     bool ok = true;
-    for (const QString name : {QStringLiteral("qt-config.ini"), QStringLiteral("frizti.ini")}) {
+    for (const QString& name : {QStringLiteral("qt-config.ini"), QStringLiteral("frizti.ini")}) {
         if (from.exists(name)) {
             QFile::remove(config.filePath(name));
             ok &= QFile::copy(from.filePath(name), config.filePath(name));

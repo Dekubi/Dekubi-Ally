@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <cstdlib>
 #include <filesystem>
 #include <utility>
 #include <QTimer>
@@ -45,7 +46,7 @@ namespace fs = std::filesystem;
 
 namespace {
 
-constexpr wchar_t ExeName[] = L"lichii.exe";
+constexpr wchar_t ExeName[] = L"dekubi.exe";
 // Set for a restarted process to a note it shows once it is up, such as "v5 is installed".
 constexpr char RestartNoteVariable[] = "LICHII_UPDATE_NOTE";
 
@@ -59,6 +60,14 @@ QString& RestartNote() {
     static QString note;
     return note;
 }
+
+#ifdef __linux__
+// The AppImage file this process runs from (empty outside an AppImage).
+fs::path AppImagePath() {
+    const char* appimage = std::getenv("APPIMAGE");
+    return appimage && *appimage ? fs::path{appimage} : fs::path{};
+}
+#endif
 
 fs::path InstallDir() {
     if (LaunchExe().empty()) {
@@ -227,6 +236,21 @@ void UpdateDialog::Download() {
                   "Documents.")
                    .arg(QDir::toNativeSeparators(QString::fromStdWString(InstallDir().wstring()))));
     }
+#elif defined(__linux__)
+    if (m_dekubi && Updater::CanInstallInPlace()) {
+        const auto folder = AppImagePath().parent_path();
+        if (UpdateInstaller::IsWritable(folder)) {
+            ReplaceAppImage();
+            return;
+        }
+        LOG_WARNING(Frontend, "Cannot write to {}, downloading the update instead",
+                    PathText(folder));
+        Notify(parentWidget(), QMessageBox::Information, tr("Update Needs to Be Installed by Hand"),
+               tr("Dekubi can't write to the folder of its AppImage (%1), so it can't update "
+                  "itself there. The new AppImage will be downloaded instead: put it in place of "
+                  "the old one.")
+                   .arg(QString::fromStdString(PathText(folder))));
+    }
 #endif
     SaveToFolder();
 }
@@ -315,7 +339,7 @@ void UpdateDialog::InstallInPlace() {
 
     const auto package = UpdateInstaller::FindPackageRoot(unpacked, ExeName);
     if (!package) {
-        fail(tr("The downloaded update does not contain lichii.exe."));
+        fail(tr("The downloaded update does not contain dekubi.exe."));
         return;
     }
 
@@ -346,6 +370,37 @@ void UpdateDialog::InstallInPlace() {
         return;
     }
 }
+#elif defined(__linux__)
+void UpdateDialog::ReplaceAppImage() {
+    // The new AppImage is downloaded next to the old one and renamed over it, which is atomic on
+    // one file system. The running process keeps its mounted image of the old file until it exits.
+    const auto appimage = AppImagePath();
+    auto download = appimage;
+    download += ".update";
+    if (!DownloadTo(QString::fromStdString(PathText(download)))) {
+        return;
+    }
+    std::error_code ec;
+    fs::permissions(download,
+                    fs::perms::owner_all | fs::perms::group_read | fs::perms::group_exec |
+                        fs::perms::others_read | fs::perms::others_exec,
+                    fs::perm_options::replace, ec);
+    if (!ec) {
+        fs::rename(download, appimage, ec);
+    }
+    if (ec) {
+        LOG_ERROR(Frontend, "Could not replace {}: {}", PathText(appimage), ec.message());
+        std::error_code ignored;
+        fs::remove(download, ignored);
+        Notify(parentWidget(), QMessageBox::Critical, tr("Failed to install the update"),
+               tr("Could not replace the AppImage (%1). Dekubi was not changed.")
+                   .arg(ErrorText(ec)));
+        return;
+    }
+    LOG_INFO(Frontend, "Installed {} as {}", m_release.tag, PathText(appimage));
+    Updater::Restart(parentWidget(),
+                     tr("%1 is installed.").arg(QString::fromStdString(m_release.title)));
+}
 #endif
 
 // TODO: migrate to a net.cpp wrapper
@@ -370,6 +425,10 @@ bool UpdateDialog::DownloadTo(const QString& filename) {
 
 #ifdef YUZU_BUNDLED_OPENSSL
     client->load_ca_cert_store(kCert, sizeof(kCert));
+#else
+    if (const char* bundle = Common::Net::SystemCaBundle()) {
+        client->set_ca_cert_path(bundle);
+    }
 #endif
 
     if (client == nullptr) {
@@ -518,12 +577,21 @@ bool CanInstallInPlace() {
            !UpdateInstaller::IsUpdaterFolder(install_dir) &&
            QString::fromStdWString(exe.filename().wstring())
                    .compare(QString::fromWCharArray(ExeName), Qt::CaseInsensitive) == 0;
+#elif defined(__linux__) && defined(ENABLE_UPDATE_CHECKER)
+    const auto appimage = AppImagePath();
+    std::error_code ec;
+    return UpdateChecker::RunningVersion().has_value() && !appimage.empty() &&
+           fs::is_regular_file(appimage, ec);
 #else
     return false;
 #endif
 }
 
 bool FinishPendingSwap(QWidget* window) {
+#ifndef _WIN32
+    // The AppImage is replaced in one rename: there is never a swap to finish.
+    return false;
+#endif
     if (!CanInstallInPlace()) {
         return false;
     }
@@ -567,6 +635,10 @@ bool FinishPendingSwap(QWidget* window) {
 }
 
 std::optional<QString> RollbackVersion() {
+#ifndef _WIN32
+    // An AppImage update keeps no previous version.
+    return std::nullopt;
+#endif
     if (!CanInstallInPlace()) {
         return std::nullopt;
     }
@@ -638,7 +710,11 @@ void RollBack(QWidget* window) {
 
 bool Restart(QWidget* window, const QString& note) {
     // The install folder from startup: Qt's applicationDirPath() now names update-old.
+#ifdef __linux__
+    const auto exe = AppImagePath().empty() ? InstallDir() / ExeName : AppImagePath();
+#else
     const auto exe = InstallDir() / ExeName;
+#endif
     const auto program = QString::fromStdWString(exe.wstring());
     std::error_code ec;
     if (UpdateInstaller::IsUpdaterFolder(exe.parent_path()) || !fs::is_regular_file(exe, ec)) {
@@ -661,6 +737,20 @@ bool Restart(QWidget* window, const QString& note) {
     // its own.
     auto environment = LaunchEnvironment().isEmpty() ? QProcessEnvironment::systemEnvironment()
                                                      : LaunchEnvironment();
+#ifdef __linux__
+    // The AppImage runtime sets these for the old mount, which goes away when this process exits;
+    // the new AppImage sets its own.
+    if (const auto appdir = environment.value(QStringLiteral("APPDIR")); !appdir.isEmpty()) {
+        for (const auto& key : environment.keys()) {
+            if (environment.value(key).contains(appdir)) {
+                environment.remove(key);
+            }
+        }
+    }
+    for (const auto* key : {"APPDIR", "APPIMAGE", "ARGV0", "OWD"}) {
+        environment.remove(QString::fromLatin1(key));
+    }
+#endif
     environment.insert(QString::fromLatin1(UpdateInstaller::RestartWaitVariable),
                        QString::number(QCoreApplication::applicationPid()));
     if (!note.isEmpty()) {

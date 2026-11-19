@@ -128,6 +128,8 @@ add_library(video_core STATIC
     nx2_recipe.cpp
     nx2_recipe.h
     nx2_debug_control.h
+    nx2_fast_draw.cpp
+    nx2_fast_draw.h
     nx2_frame_fence.h
     nx2_list_verify.h
     nx2_profile.h
@@ -186,6 +188,7 @@ add_library(video_core STATIC
     renderer_vulkan/framebuffer_limits.h
     renderer_vulkan/maxwell_to_vk.cpp
     renderer_vulkan/maxwell_to_vk.h
+    renderer_vulkan/mesh_vertex_input.h
     renderer_vulkan/pipeline_build.h
     renderer_vulkan/pipeline_helper.h
     renderer_vulkan/pipeline_optimization.h
@@ -334,6 +337,8 @@ add_library(video_core STATIC
     texture_cache/image_view_base.h
     texture_cache/image_view_info.cpp
     texture_cache/image_view_info.h
+    texture_cache/relocation_memory.cpp
+    texture_cache/relocation_memory.h
     texture_cache/render_targets.h
     texture_cache/samples_helper.h
     texture_cache/superseded_images.h

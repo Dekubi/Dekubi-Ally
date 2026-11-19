@@ -38,6 +38,8 @@ See the [build guide](docs/Build.md) and the [coding guidelines](docs/Coding.md)
 
 Dekubi Ally stands on the work of the Lichii / Fritchii, Eglantine, Eden, yuzu and Sudachi contributors. Built-in Ocarina of Time patches credit their authors in `src/core/file_sys/patch_manager.cpp`. Icon credits: `ICON_CREDITS.html` in the release archive.
 
+Performance optimization, device-tier profiling, memory diagnosis, and upstream porting assisted by Claude (Anthropic) and Gemini (Google DeepMind).
+
 ## License
 
 GPL-3.0-or-later, see [LICENSE](LICENSE) and [LICENSES](LICENSES).

@@ -277,23 +277,6 @@ VkResult MemoryAllocator::AllocateImage(const VkImageCreateInfo &ci, bool dedica
         result = vmaCreateImage(allocator, &ci, &relaxed, &handle, &allocation, &alloc_info);
     }
     if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY && !huge) {
-        // Still out of device memory: a real image in host memory (slow, but valid) beats one
-        // with nothing bound, which AMD's drivers do not survive being sampled.
-        VmaAllocationCreateInfo host = alloc_ci;
-        host.flags &= ~VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT;
-        host.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
-        host.preferredFlags = 0;
-        result = vmaCreateImage(allocator, &ci, &host, &handle, &allocation, &alloc_info);
-        static u32 host_logged{};
-        if (result == VK_SUCCESS && host_logged++ < 16) {
-            LOG_WARNING(Render_Vulkan,
-                        "Image {}x{}x{} ({} levels, {} layers, format {}) is out of device memory; "
-                        "placed in host memory",
-                        ci.extent.width, ci.extent.height, ci.extent.depth, ci.mipLevels,
-                        ci.arrayLayers, static_cast<u32>(ci.format));
-        }
-    }
-    if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY && !huge) {
         pressure_events.fetch_add(1, std::memory_order_relaxed);
     }
     if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY && ci.imageType != VK_IMAGE_TYPE_1D &&
@@ -436,17 +419,19 @@ bool MemoryAllocator::CreateBufferInSeparatePool(const VkBufferCreateInfo& ci, M
            VK_SUCCESS;
 }
 
-vk::Buffer MemoryAllocator::CreateBuffer(const VkBufferCreateInfo &ci, MemoryUsage usage) const {
+VkResult MemoryAllocator::AllocateBuffer(const VkBufferCreateInfo &ci, MemoryUsage usage,
+                                        VkDeviceSize min_alignment, vk::Buffer &buffer) const {
     // MESA will do memcpy() if not marked as host cached, so just force mark it for most buffers
     auto const anv_flags = (usage == MemoryUsage::Stream
         && device.GetDriverID() == VK_DRIVER_ID_INTEL_OPEN_SOURCE_MESA)
         ? VK_MEMORY_PROPERTY_HOST_CACHED_BIT : 0;
+    u32 memory_type_bits = usage == MemoryUsage::Stream ? 0u : valid_memory_types;
     const VmaAllocationCreateInfo alloc_ci = {
         .flags = VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT | MemoryUsageVmaFlags(usage),
         .usage = MemoryUsageVma(usage),
         .requiredFlags = 0,
         .preferredFlags = MemoryUsagePreferredVmaFlags(usage) | anv_flags,
-        .memoryTypeBits = usage == MemoryUsage::Stream ? 0u : valid_memory_types,
+        .memoryTypeBits = memory_type_bits,
         .pool = VK_NULL_HANDLE,
         .pUserData = nullptr,
         .priority = 0.f,
@@ -457,9 +442,18 @@ vk::Buffer MemoryAllocator::CreateBuffer(const VkBufferCreateInfo &ci, MemoryUsa
     VmaAllocation allocation{};
     VkMemoryPropertyFlags property_flags{};
 
-    if (!CreateBufferInSeparatePool(ci, usage, alloc_ci, handle, allocation, alloc_info)) {
-        VkResult result = vmaCreateBuffer(allocator, &ci, &alloc_ci, &handle, &allocation,
-                                          &alloc_info);
+    bool separate_pool = false;
+    VkResult result = VK_SUCCESS;
+    if (min_alignment <= 1) {
+        separate_pool = CreateBufferInSeparatePool(ci, usage, alloc_ci, handle, allocation, alloc_info);
+    }
+    if (!separate_pool) {
+        if (min_alignment <= 1) {
+            result = vmaCreateBuffer(allocator, &ci, &alloc_ci, &handle, &allocation, &alloc_info);
+        } else {
+            result = vmaCreateBufferWithAlignment(allocator, &ci, &alloc_ci, min_alignment, &handle,
+                                                  &allocation, &alloc_info);
+        }
         // Staging buffers live in system memory, where the budget is the OS's soft hint: going
         // over it pages, refusing aborted the emulator (a texture upload in Ocarina's town
         // square after 36 minutes). Device-local buffers keep the budget.
@@ -467,13 +461,20 @@ vk::Buffer MemoryAllocator::CreateBuffer(const VkBufferCreateInfo &ci, MemoryUsa
             usage != MemoryUsage::DeviceLocal) {
             VmaAllocationCreateInfo over_budget = alloc_ci;
             over_budget.flags &= ~VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT;
-            result = vmaCreateBuffer(allocator, &ci, &over_budget, &handle, &allocation,
-                                     &alloc_info);
+            if (min_alignment <= 1) {
+                result = vmaCreateBuffer(allocator, &ci, &over_budget, &handle, &allocation,
+                                         &alloc_info);
+            } else {
+                result = vmaCreateBufferWithAlignment(allocator, &ci, &over_budget, min_alignment,
+                                                      &handle, &allocation, &alloc_info);
+            }
             LOG_WARNING(Render_Vulkan,
-                        "Buffer of {} KiB (usage {}) over the memory budget: {}", ci.size >> 10,
-                        static_cast<u32>(usage), result == VK_SUCCESS ? "made anyway" : "failed");
+                        "Buffer of {} KiB (usage {}, alignment {}) over the memory budget: {}", ci.size >> 10,
+                        static_cast<u32>(usage), min_alignment, result == VK_SUCCESS ? "made anyway" : "failed");
         }
-        vk::Check(result);
+    }
+    if (result != VK_SUCCESS) {
+        return result;
     }
     vmaGetAllocationMemoryProperties(allocator, allocation, &property_flags);
 
@@ -496,58 +497,41 @@ vk::Buffer MemoryAllocator::CreateBuffer(const VkBufferCreateInfo &ci, MemoryUsa
         .offset = alloc_info.offset,
         .memory_type = alloc_info.memoryType,
     };
-    return vk::Buffer(handle, *device.GetLogical(), allocator, allocation, mapped_data, is_coherent,
-                      location, device.GetDispatchLoader());
+    buffer = vk::Buffer(handle, *device.GetLogical(), allocator, allocation, mapped_data, is_coherent,
+                        location, device.GetDispatchLoader());
+    return VK_SUCCESS;
+}
+
+vk::Buffer MemoryAllocator::CreateBuffer(const VkBufferCreateInfo &ci, MemoryUsage usage) const {
+    vk::Buffer buffer;
+    vk::Check(AllocateBuffer(ci, usage, 0, buffer));
+    return buffer;
 }
 
 vk::Buffer MemoryAllocator::CreateBuffer(const VkBufferCreateInfo &ci, MemoryUsage usage,
                                          VkDeviceSize min_alignment) const {
-    if (min_alignment <= 1) {
-        return CreateBuffer(ci, usage);
-    }
-    VkMemoryPropertyFlags anv_flags = 0;
-    if (usage == MemoryUsage::Stream &&
-        device.GetDriverID() == VK_DRIVER_ID_INTEL_OPEN_SOURCE_MESA) {
-        anv_flags = VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
-    }
-    u32 memory_type_bits = valid_memory_types;
-    if (usage == MemoryUsage::Stream) {
-        memory_type_bits = 0u;
-    }
-    const VmaAllocationCreateInfo alloc_ci = {
-        .flags = VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT | MemoryUsageVmaFlags(usage),
-        .usage = MemoryUsageVma(usage),
-        .requiredFlags = 0,
-        .preferredFlags = MemoryUsagePreferredVmaFlags(usage) | anv_flags,
-        .memoryTypeBits = memory_type_bits,
-        .pool = VK_NULL_HANDLE,
-        .pUserData = nullptr,
-        .priority = 0.f,
-    };
+    vk::Buffer buffer;
+    vk::Check(AllocateBuffer(ci, usage, min_alignment, buffer));
+    return buffer;
+}
 
-    VkBuffer handle{};
-    VmaAllocationInfo alloc_info{};
-    VmaAllocation allocation{};
-    VkMemoryPropertyFlags property_flags{};
-
-    vk::Check(vmaCreateBufferWithAlignment(allocator, &ci, &alloc_ci, min_alignment, &handle,
-                                           &allocation, &alloc_info));
-    vmaGetAllocationMemoryProperties(allocator, allocation, &property_flags);
-
-    u8 *data = reinterpret_cast<u8 *>(alloc_info.pMappedData);
-    std::span<u8> mapped_data{};
-    if (data) {
-        mapped_data = std::span<u8>{data, ci.size};
+vk::Buffer MemoryAllocator::TryCreateBuffer(const VkBufferCreateInfo &ci, MemoryUsage usage) const {
+    vk::Buffer buffer;
+    const VkResult result = AllocateBuffer(ci, usage, 0, buffer);
+    if (result != VK_ERROR_OUT_OF_DEVICE_MEMORY && result != VK_ERROR_OUT_OF_HOST_MEMORY) {
+        vk::Check(result);
     }
-    const bool is_coherent = (property_flags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) != 0;
+    return buffer;
+}
 
-    const vk::MemoryLocation location{
-        .memory = alloc_info.deviceMemory,
-        .offset = alloc_info.offset,
-        .memory_type = alloc_info.memoryType,
-    };
-    return vk::Buffer(handle, *device.GetLogical(), allocator, allocation, mapped_data, is_coherent,
-                      location, device.GetDispatchLoader());
+vk::Buffer MemoryAllocator::TryCreateBuffer(const VkBufferCreateInfo &ci, MemoryUsage usage,
+                                            VkDeviceSize min_alignment) const {
+    vk::Buffer buffer;
+    const VkResult result = AllocateBuffer(ci, usage, min_alignment, buffer);
+    if (result != VK_ERROR_OUT_OF_DEVICE_MEMORY && result != VK_ERROR_OUT_OF_HOST_MEMORY) {
+        vk::Check(result);
+    }
+    return buffer;
 }
 
 MemoryCommit MemoryAllocator::Commit(const VkMemoryRequirements &reqs, MemoryUsage usage)

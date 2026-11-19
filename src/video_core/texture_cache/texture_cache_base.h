@@ -18,6 +18,7 @@
 #include <type_traits>
 // TODO: find out which don't require stable iters
 #include <unordered_map>
+#include <unordered_set>
 #include "video_core/page_filter.h"
 #include "common/container/unordered_map.h"
 #include "common/container/unordered_set.h"
@@ -88,6 +89,9 @@ using TextureCacheGPUMap = ::Common::unordered_map<u64, std::vector<ImageId>, Co
 /// first of the draw's least safe class; address 0 for a draw without targets).
 struct DrawTargets {
     DrawTargetClass kind{DrawTargetClass::Recurring};
+    /// kind, with targets drawn in every recent frame but never cleared counted as recurring
+    /// (IsRedrawnTarget).
+    DrawTargetClass kind_if_redrawn{DrawTargetClass::Recurring};
     GPUVAddr gpu_addr{};
     u32 width{};
     u32 height{};
@@ -112,6 +116,128 @@ public:
 
     TextureCacheGPUMap* gpu_page_table = nullptr;
     TextureCacheGPUMap* sparse_page_table = nullptr;
+};
+
+/// Device pages whose guest memory lost the GPU's data (TextureCache::MarkStale), one bit each.
+/// Mark and Clear call on_run(addr, size) for every run of pages whose state they changed.
+class StalePages {
+public:
+    /// Device memory pages (Core::Memory::YUZU_PAGEBITS), not the texture cache's lookup pages.
+    static constexpr u64 PAGE_BITS = 12;
+    static constexpr u64 PAGE_SIZE = u64{1} << PAGE_BITS;
+
+    /// Marks the pages wholly inside [addr, addr + size): a page shared with other data keeps
+    /// that data's state.
+    template <typename OnRun>
+    void Mark(DAddr addr, u64 size, OnRun&& on_run) {
+        const u64 first = (addr + PAGE_SIZE - 1) >> PAGE_BITS;
+        const u64 end = (addr + size) >> PAGE_BITS;
+        if (end <= first || end > MAX_PAGES) {
+            return;
+        }
+        if (bits.size() * 64 < end) {
+            bits.resize((end + 63) / 64);
+        }
+        Run<std::remove_reference_t<OnRun>> run{on_run};
+        for (u64 page = first; page < end; ++page) {
+            u64& word = bits[page / 64];
+            const u64 bit = u64{1} << (page % 64);
+            if ((word & bit) != 0) {
+                run.Flush();
+                continue;
+            }
+            word |= bit;
+            ++count;
+            run.Add(page);
+        }
+        run.Flush();
+    }
+
+    /// Clears every page [addr, addr + size) touches.
+    template <typename OnRun>
+    void Clear(DAddr addr, u64 size, OnRun&& on_run) {
+        if (count == 0 || size == 0) {
+            return;
+        }
+        const u64 first = addr >> PAGE_BITS;
+        const u64 end = (std::min<u64>)((addr + size + PAGE_SIZE - 1) >> PAGE_BITS, bits.size() * 64);
+        Run<std::remove_reference_t<OnRun>> run{on_run};
+        for (u64 page = first; page < end;) {
+            u64& word = bits[page / 64];
+            if (word == 0 && page % 64 == 0) {
+                run.Flush();
+                page += 64;
+                continue;
+            }
+            const u64 bit = u64{1} << (page % 64);
+            if ((word & bit) != 0) {
+                word &= ~bit;
+                --count;
+                run.Add(page);
+            } else {
+                run.Flush();
+            }
+            ++page;
+        }
+        run.Flush();
+    }
+
+    /// Whether every page [addr, addr + size) touches is marked.
+    [[nodiscard]] bool IsAll(DAddr addr, u64 size) const {
+        if (count == 0 || size == 0) {
+            return false;
+        }
+        const u64 first = addr >> PAGE_BITS;
+        const u64 end = (addr + size + PAGE_SIZE - 1) >> PAGE_BITS;
+        if (end > bits.size() * 64) {
+            return false;
+        }
+        for (u64 page = first; page < end;) {
+            const u64 word = bits[page / 64];
+            if (page % 64 == 0 && page + 64 <= end) {
+                if (word != ~u64{0}) {
+                    return false;
+                }
+                page += 64;
+                continue;
+            }
+            if (((word >> (page % 64)) & 1) == 0) {
+                return false;
+            }
+            ++page;
+        }
+        return true;
+    }
+
+    [[nodiscard]] u64 Count() const {
+        return count;
+    }
+
+private:
+    static constexpr u64 MAX_PAGES = u64{1} << 28;
+
+    template <typename OnRun>
+    struct Run {
+        OnRun& on_run;
+        u64 begin{};
+        u64 pages{};
+
+        void Add(u64 page) {
+            if (pages == 0) {
+                begin = page;
+            }
+            ++pages;
+        }
+        void Flush() {
+            if (pages != 0) {
+                on_run(begin << PAGE_BITS, pages << PAGE_BITS);
+                pages = 0;
+            }
+        }
+    };
+
+    std::vector<u64> bits;
+    u64 count{};
 };
 
 template <class P>
@@ -238,6 +364,25 @@ class TextureCache : public VideoCommon::ChannelSetupCaches<TextureCacheChannelI
         PixelFormat src_format;
     };
 
+    /// Render targets their lookup created, to check for early deletion (EvictDeadRenderTargets),
+    /// with their allocation tick and how often they were found still in use.
+    struct TransientTarget {
+        ImageId id;
+        u64 allocation_tick;
+        u64 check_tick;
+        u32 survived;
+    };
+    std::deque<TransientTarget> transient_targets;
+    /// Most candidates kept waiting for early deletion, over budget or not.
+    static constexpr size_t MaxTransientTargets = 8192;
+    u64 transient_evictions{};
+    u64 logged_transient_evictions{};
+    /// Image made by the latest JoinImages call; FindRenderTargetView uses it to tell a target it
+    /// just created from one that already existed.
+    ImageId last_created_image{};
+    /// Deletes dead render targets early while the cache is over its expected size.
+    void EvictDeadRenderTargets();
+
 public:
     /// Device pages this cache ever registered objects on (InnerInvalidation skips the rest).
     VideoCommon::PageFilter page_filter;
@@ -258,6 +403,13 @@ public:
 
     /// Mark an image as modified from the GPU
     void MarkModification(ImageId id) noexcept;
+
+    /// Mark the image behind a view a shader writes through as a storage image
+    void MarkStorageWrite(ImageViewId id) noexcept;
+
+    /// Whether a view's image is absent or holds a shader's storage writes over every level it
+    /// covers, with nothing newer (no clear, render pass, copy or CPU write since).
+    [[nodiscard]] bool StorageViewHoldsShaderWrites(ImageViewId id) const noexcept;
 
     /// Fill image_view_ids with the graphics/compute images in indices
     void FillImageViews(std::span<ImageViewInOut> views, bool compute, bool blacklist = true);
@@ -908,6 +1060,34 @@ private:
     static constexpr u64 STALE_PAGE_BITS = 12;
     std::vector<u64> stale_bits; ///< One bit per device page
     u64 stale_page_count{};
+    /// Whether dropping this image without a download loses data only the GPU has (MarkStale).
+    [[nodiscard]] static bool LosesGpuData(const ImageBase& image);
+    /// Pages early-deleted render targets left (EvictDeadRenderTargets); a CPU write clears them.
+    StalePages evicted_pages;
+    /// Render target shapes (format, width, height) the game read back after an early deletion:
+    /// written back before one is deleted early, or left to the collector.
+    std::unordered_set<u64> readback_shapes;
+    /// Targets smaller than this aren't deleted early: they barely relieve memory.
+    static constexpr u64 MinEvictBytes = u64{1} << 20;
+    /// The latest early deletions, to find the shape a read-back image was made over.
+    static constexpr size_t MaxRecentEvictions = 16384;
+    struct RecentEviction {
+        DAddr end;
+        u64 shape;
+        u64 sequence;
+    };
+    std::map<DAddr, RecentEviction> recent_evictions;
+    std::deque<std::pair<DAddr, u64>> recent_eviction_order;
+    u64 eviction_sequence{};
+    u64 evict_born{};       ///< Images made over early-deleted pages
+    u64 evict_read_back{};  ///< ...of which sampled before any draw
+    u64 evict_saved{};      ///< Read-back shapes written back before deletion
+    u64 evict_spared{};     ///< Read-back shapes left to the collector (not downloadable)
+    u64 evict_small_kept{}; ///< Small targets left to the collector
+    [[nodiscard]] static u64 RtShapeKey(const ImageBase& image) {
+        return (u64{static_cast<u32>(image.info.format)} << 40) |
+               (u64{image.info.size.width & 0xFFFFF} << 20) | (image.info.size.height & 0xFFFFF);
+    }
     u64 tc_stale_skips{};        ///< Uploads skipped (last 600 frames)
     u64 tc_stale_skip_bytes{};
     u64 tc_stale_gpu_written{};  ///< Stale but buffer-written pages: uploaded after all
